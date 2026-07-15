@@ -24,6 +24,29 @@ pub fn render_bar_icon_rgba(
     weekly_percent: Option<f64>,
     has_error: bool,
 ) -> (Vec<u8>, u32, u32) {
+    render_bar_icon_rgba_with_color_percent(
+        session_percent,
+        weekly_percent,
+        session_percent,
+        weekly_percent,
+        has_error,
+    )
+}
+
+/// Render a usage-bar tray icon while deriving fill and alert colour from
+/// independent percentages.
+///
+/// This is used when the fill represents remaining quota while the colour
+/// must continue to represent consumption. The original
+/// [`render_bar_icon_rgba`] API remains a convenience wrapper for callers
+/// whose fill and colour use the same percentage.
+pub fn render_bar_icon_rgba_with_color_percent(
+    session_percent: f64,
+    weekly_percent: Option<f64>,
+    session_color_percent: f64,
+    weekly_color_percent: Option<f64>,
+    has_error: bool,
+) -> (Vec<u8>, u32, u32) {
     const SZ: u32 = TRAY_ICON_SIZE;
     let mut img: RgbaImage = ImageBuffer::new(SZ, SZ);
 
@@ -55,8 +78,8 @@ pub fn render_bar_icon_rgba(
 
     let fill_px = |pct: f64| ((pct.clamp(0.0, 100.0) / 100.0) * bar_width as f64) as u32;
 
-    let mut draw_bar = |y_start: u32, y_end: u32, pct: f64| {
-        let (r, g, b) = color_for(pct);
+    let mut draw_bar = |y_start: u32, y_end: u32, pct: f64, color_pct: f64| {
+        let (r, g, b) = color_for(color_pct);
         let fill_end = (bar_left + fill_px(pct)).min(bar_right);
         for y in y_start..y_end {
             for x in bar_left..bar_right {
@@ -72,11 +95,11 @@ pub fn render_bar_icon_rgba(
 
     match weekly_percent {
         Some(weekly) => {
-            draw_bar(8, 15, session_percent); // session bar (top, thicker)
-            draw_bar(18, 23, weekly); // weekly bar (bottom, thinner)
+            draw_bar(8, 15, session_percent, session_color_percent); // session bar (top, thicker)
+            draw_bar(18, 23, weekly, weekly_color_percent.unwrap_or(weekly)); // weekly bar (bottom, thinner)
         }
         None => {
-            draw_bar(10, 22, session_percent); // single thick bar (centred)
+            draw_bar(10, 22, session_percent, session_color_percent); // single thick bar (centred)
         }
     }
 
@@ -85,6 +108,16 @@ pub fn render_bar_icon_rgba(
 
 /// Render a compact numeric percent tray icon as raw RGBA bytes.
 pub fn render_percent_icon_rgba(percent: f64, has_error: bool) -> (Vec<u8>, u32, u32) {
+    render_percent_icon_rgba_with_color_percent(percent, percent, has_error)
+}
+
+/// Render a compact numeric percent tray icon while deriving its alert colour
+/// from a separate consumption percentage.
+pub fn render_percent_icon_rgba_with_color_percent(
+    percent: f64,
+    color_percent: f64,
+    has_error: bool,
+) -> (Vec<u8>, u32, u32) {
     const SZ: u32 = TRAY_ICON_SIZE;
     let mut img: RgbaImage = ImageBuffer::new(SZ, SZ);
 
@@ -113,7 +146,7 @@ pub fn render_percent_icon_rgba(percent: f64, has_error: bool) -> (Vec<u8>, u32,
     let start_x = (SZ.saturating_sub(text_width)) / 2;
     let start_y = (SZ.saturating_sub(text_height)) / 2;
 
-    let (r, g, b) = UsageLevel::from_percent(percent).color();
+    let (r, g, b) = UsageLevel::from_percent(color_percent).color();
     let color = if has_error {
         let gray = ((r as u16 + g as u16 + b as u16) / 3) as u8;
         Rgba([gray, gray, gray, 255])
@@ -211,6 +244,16 @@ mod tests {
     }
 
     #[test]
+    fn full_remaining_fill_uses_low_consumption_color() {
+        let (rgba, w, _h) = render_bar_icon_rgba_with_color_percent(100.0, None, 0.0, None, false);
+        let idx = ((16 * w + 8) * 4) as usize;
+        let (er, eg, eb) = UsageLevel::Low.color();
+        assert_eq!(rgba[idx], er);
+        assert_eq!(rgba[idx + 1], eg);
+        assert_eq!(rgba[idx + 2], eb);
+    }
+
+    #[test]
     fn error_state_desaturates_colors() {
         let (normal, _, _) = render_bar_icon_rgba(100.0, None, false);
         let (error, _, _) = render_bar_icon_rgba(100.0, None, true);
@@ -239,5 +282,22 @@ mod tests {
     fn percent_icon_clamps_to_hundred() {
         let (rgba, w, h) = render_percent_icon_rgba(125.0, false);
         assert_eq!(rgba.len() as u32, w * h * 4);
+    }
+
+    #[test]
+    fn full_remaining_percent_text_uses_low_consumption_color() {
+        let (rgba, _, _) = render_percent_icon_rgba_with_color_percent(100.0, 0.0, false);
+        let low = UsageLevel::Low.color();
+        let critical = UsageLevel::Critical.color();
+
+        assert!(rgba.chunks_exact(4).any(|pixel| {
+            pixel[0] == low.0 && pixel[1] == low.1 && pixel[2] == low.2 && pixel[3] == 255
+        }));
+        assert!(!rgba.chunks_exact(4).any(|pixel| {
+            pixel[0] == critical.0
+                && pixel[1] == critical.1
+                && pixel[2] == critical.2
+                && pixel[3] == 255
+        }));
     }
 }

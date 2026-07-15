@@ -12,6 +12,18 @@ pub struct DetectedBrowserBridge {
     pub profile_count: usize,
 }
 
+fn visible_browser_import_provider_arg(provider_id: &str) -> Result<ProviderId, String> {
+    let id = parse_provider_arg(provider_id)?;
+    if crate::product_policy::is_visible_provider(id) {
+        Ok(id)
+    } else {
+        Err(format!(
+            "Provider '{}' is not available in the desktop product",
+            id.cli_name()
+        ))
+    }
+}
+
 /// List all browsers detected on this machine that CodexBar can read cookies from.
 ///
 /// On non-Windows platforms (e.g. Linux CI) this returns an empty list because
@@ -46,7 +58,7 @@ pub fn import_browser_cookies(
     use codexbar::browser::detection::BrowserDetector;
 
     // Resolve the provider to get its cookie domain.
-    let pid = parse_provider_arg(&provider_id)?;
+    let pid = visible_browser_import_provider_arg(&provider_id)?;
 
     let settings = Settings::load();
     let domain = if pid == codexbar::core::ProviderId::MiniMax {
@@ -99,5 +111,19 @@ fn browser_type_key(bt: codexbar::browser::detection::BrowserType) -> &'static s
         BrowserType::Arc => "arc",
         BrowserType::Firefox => "firefox",
         BrowserType::Chromium => "chromium",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_import_only_accepts_visible_providers() {
+        assert_eq!(
+            visible_browser_import_provider_arg(ProviderId::Codex.cli_name()),
+            Ok(ProviderId::Codex)
+        );
+        assert!(visible_browser_import_provider_arg(ProviderId::Claude.cli_name()).is_err());
     }
 }

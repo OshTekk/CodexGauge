@@ -171,6 +171,7 @@ impl ProofCommand {
             _ => {
                 if let Some(provider_id) = raw.strip_prefix("open-provider:")
                     && is_supported_provider_id(provider_id)
+                    && crate::product_policy::is_visible_provider_cli_name(provider_id)
                 {
                     return Some(Self::OpenProvider {
                         provider_id: provider_id.to_string(),
@@ -373,6 +374,11 @@ fn open_proof_provider(
     app: &AppHandle,
     provider_id: String,
 ) -> Result<ProofCommandOutcome, String> {
+    if !crate::product_policy::is_visible_provider_cli_name(&provider_id) {
+        return Err(format!(
+            "provider '{provider_id}' is not available in the desktop product"
+        ));
+    }
     shell::transition_to_target(
         app,
         SurfaceMode::PopOut,
@@ -590,7 +596,10 @@ fn proof_payload_is_supported(surface_mode: SurfaceMode, payload: Option<&str>) 
 
             match target {
                 SurfaceTarget::Dashboard => true,
-                SurfaceTarget::Provider { provider_id } => is_supported_provider_id(&provider_id),
+                SurfaceTarget::Provider { provider_id } => {
+                    is_supported_provider_id(&provider_id)
+                        && crate::product_policy::is_visible_provider_cli_name(&provider_id)
+                }
                 _ => false,
             }
         }
@@ -792,6 +801,14 @@ mod tests {
     #[test]
     fn parse_proof_command_rejects_unknown_provider() {
         assert!(ProofCommand::parse("open-provider:not-a-provider").is_none());
+    }
+
+    #[test]
+    fn proof_mode_rejects_hidden_provider() {
+        assert!(ProofCommand::parse("open-provider:claude").is_none());
+        with_proof_mode_env(Some("popOut:provider:claude"), || {
+            assert!(ProofConfig::from_env().is_none());
+        });
     }
 
     #[test]

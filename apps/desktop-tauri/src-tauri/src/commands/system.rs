@@ -242,9 +242,21 @@ fn status_page_url_for_provider(provider_id: &str) -> Option<String> {
     provider.metadata().status_page_url.map(|s| s.to_string())
 }
 
+fn visible_system_provider_arg(provider_id: &str) -> Result<String, String> {
+    let provider_id = canonical_provider_arg(provider_id)?;
+    if crate::product_policy::is_visible_provider_cli_name(&provider_id) {
+        Ok(provider_id)
+    } else {
+        Err(format!(
+            "Provider '{}' is not available in the desktop product",
+            provider_id
+        ))
+    }
+}
+
 #[tauri::command]
 pub fn open_provider_dashboard(provider_id: String) -> Result<(), String> {
-    let provider_id = canonical_provider_arg(&provider_id)?;
+    let provider_id = visible_system_provider_arg(&provider_id)?;
     let url = dashboard_url_for_provider(&provider_id)
         .ok_or_else(|| format!("No dashboard URL registered for provider '{provider_id}'"))?;
     open_url_in_browser(&url)
@@ -252,7 +264,7 @@ pub fn open_provider_dashboard(provider_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_provider_status_page(provider_id: String) -> Result<(), String> {
-    let provider_id = canonical_provider_arg(&provider_id)?;
+    let provider_id = visible_system_provider_arg(&provider_id)?;
     let url = status_page_url_for_provider(&provider_id)
         .ok_or_else(|| format!("No status page URL registered for provider '{provider_id}'"))?;
     open_url_in_browser(&url)
@@ -263,8 +275,8 @@ pub async fn trigger_provider_login(
     app: tauri::AppHandle,
     provider_id: String,
 ) -> Result<(), String> {
+    let provider_id = visible_system_provider_arg(&provider_id)?;
     let id = parse_provider_arg(&provider_id)?;
-    let provider_id = id.cli_name().to_string();
 
     if id == ProviderId::Copilot {
         return run_copilot_device_login(&app).await;
@@ -354,5 +366,14 @@ mod tests {
             dashboard_url_for_provider("codex").as_deref(),
             Some("https://chatgpt.com/codex/settings/usage")
         );
+    }
+
+    #[test]
+    fn system_provider_actions_only_accept_visible_providers() {
+        assert_eq!(
+            visible_system_provider_arg(ProviderId::Codex.cli_name()),
+            Ok(ProviderId::Codex.cli_name().to_string())
+        );
+        assert!(visible_system_provider_arg(ProviderId::Claude.cli_name()).is_err());
     }
 }

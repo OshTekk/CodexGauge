@@ -1,5 +1,16 @@
 use super::*;
 
+fn ensure_credential_detection_available(provider: ProviderId) -> Result<(), String> {
+    if crate::product_policy::is_visible_provider(provider) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Provider '{}' is not available in desktop product",
+            provider.cli_name()
+        ))
+    }
+}
+
 // ── Credential detection ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +57,7 @@ fn jetbrains_detected_ide_paths() -> Vec<std::path::PathBuf> {
 
 #[tauri::command]
 pub fn get_gemini_cli_signed_in() -> Result<GeminiCliStatus, String> {
+    ensure_credential_detection_available(ProviderId::Gemini)?;
     let path = gemini_cli_credentials_path();
     let signed_in = path.as_ref().map(|p| p.exists()).unwrap_or(false);
     Ok(GeminiCliStatus {
@@ -56,6 +68,7 @@ pub fn get_gemini_cli_signed_in() -> Result<GeminiCliStatus, String> {
 
 #[tauri::command]
 pub fn get_vertexai_status() -> Result<VertexAiStatus, String> {
+    ensure_credential_detection_available(ProviderId::VertexAI)?;
     let path = vertexai_credentials_path_raw();
     let has = path.as_ref().map(|p| p.exists()).unwrap_or(false);
     Ok(VertexAiStatus {
@@ -66,6 +79,7 @@ pub fn get_vertexai_status() -> Result<VertexAiStatus, String> {
 
 #[tauri::command]
 pub fn list_jetbrains_detected_ides() -> Result<Vec<JetbrainsIde>, String> {
+    ensure_credential_detection_available(ProviderId::JetBrains)?;
     let settings = Settings::load();
     let override_path = settings.jetbrains_ide_base_path().to_string();
 
@@ -106,6 +120,7 @@ pub fn list_jetbrains_detected_ides() -> Result<Vec<JetbrainsIde>, String> {
 
 #[tauri::command]
 pub fn set_jetbrains_ide_path(path: String) -> Result<(), String> {
+    ensure_credential_detection_available(ProviderId::JetBrains)?;
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("JetBrains IDE path is empty".to_string());
@@ -124,6 +139,7 @@ pub fn set_jetbrains_ide_path(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_kiro_status() -> Result<KiroStatus, String> {
+    ensure_credential_detection_available(ProviderId::Kiro)?;
     if let Some(path) = codexbar::providers::kiro::find_kiro_cli() {
         Ok(KiroStatus {
             available: true,
@@ -134,5 +150,50 @@ pub fn get_kiro_status() -> Result<KiroStatus, String> {
             available: false,
             hint: Some("kiro-cli: not found on PATH or known install locations".into()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_provider_credential_detection_is_unavailable() {
+        for provider in [
+            ProviderId::Gemini,
+            ProviderId::VertexAI,
+            ProviderId::JetBrains,
+            ProviderId::Kiro,
+        ] {
+            let error = ensure_credential_detection_available(provider).unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "Provider '{}' is not available in desktop product",
+                    provider.cli_name()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn credential_detection_guard_follows_desktop_policy() {
+        assert!(ensure_credential_detection_available(ProviderId::Codex).is_ok());
+    }
+
+    #[test]
+    fn credential_detection_commands_fail_before_io() {
+        let unavailable = |error: String| {
+            assert!(
+                error.contains("not available in desktop product"),
+                "unexpected error: {error}"
+            );
+        };
+
+        unavailable(get_gemini_cli_signed_in().unwrap_err());
+        unavailable(get_vertexai_status().unwrap_err());
+        unavailable(list_jetbrains_detected_ides().unwrap_err());
+        unavailable(set_jetbrains_ide_path(String::new()).unwrap_err());
+        unavailable(get_kiro_status().unwrap_err());
     }
 }

@@ -49,11 +49,9 @@ fn powertoys_local_usage_provider_ids(settings: &Settings) -> Vec<String> {
         return Vec::new();
     }
 
-    settings
-        .get_enabled_provider_ids()
-        .into_iter()
+    crate::product_policy::visible_provider_ids()
+        .filter(|provider| settings.is_provider_enabled(*provider))
         .map(|provider| provider.cli_name().to_string())
-        .filter(|provider_id| matches!(provider_id.as_str(), "codex" | "claude"))
         .collect()
 }
 
@@ -104,18 +102,22 @@ mod tests {
     }
 
     #[test]
-    fn powertoys_local_usage_refresh_only_includes_supported_enabled_providers() {
+    fn powertoys_local_usage_refresh_only_includes_visible_enabled_providers() {
         let mut settings = Settings::default();
         assert!(powertoys_local_usage_provider_ids(&settings).is_empty());
 
         settings.powertoys_status_pipe_enabled = true;
-        settings.enabled_providers = ["codex".to_string(), "cursor".to_string()]
-            .into_iter()
-            .collect();
+        settings.enabled_providers = [
+            codexbar::core::ProviderId::Codex.cli_name().to_string(),
+            codexbar::core::ProviderId::Claude.cli_name().to_string(),
+            codexbar::core::ProviderId::Cursor.cli_name().to_string(),
+        ]
+        .into_iter()
+        .collect();
 
         assert_eq!(
             powertoys_local_usage_provider_ids(&settings),
-            vec!["codex".to_string()]
+            vec![codexbar::core::ProviderId::Codex.cli_name().to_string()]
         );
     }
 }

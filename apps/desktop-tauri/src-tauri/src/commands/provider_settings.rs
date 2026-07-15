@@ -1,5 +1,26 @@
 use super::*;
 
+fn ensure_visible_desktop_provider(
+    provider_id: &str,
+) -> Result<codexbar::core::ProviderId, String> {
+    let provider = codexbar::core::ProviderId::from_cli_name(provider_id)
+        .ok_or_else(|| format!("Provider '{provider_id}' is not available in desktop product"))?;
+    if crate::product_policy::is_visible_provider(provider) {
+        Ok(provider)
+    } else {
+        Err(format!(
+            "Provider '{provider_id}' is not available in desktop product"
+        ))
+    }
+}
+
+fn ensure_visible_desktop_providers(provider_ids: &[String]) -> Result<(), String> {
+    for provider_id in provider_ids {
+        ensure_visible_desktop_provider(provider_id)?;
+    }
+    Ok(())
+}
+
 // ── Provider summaries + ordering ─────────────────────────────────────
 
 /// Lightweight provider entry returned to the UI after a reorder.
@@ -14,24 +35,42 @@ pub struct ProviderSummary {
 
 /// Build `ProviderSummary` list honouring the persisted `provider_order`.
 pub(crate) fn build_provider_summaries(settings: &Settings) -> Vec<ProviderSummary> {
-    let order = settings.provider_display_order_names();
-
-    let by_id: std::collections::HashMap<String, &ProviderId> = ProviderId::all()
-        .iter()
-        .map(|p| (p.cli_name().to_string(), p))
-        .collect();
-
-    order
-        .iter()
+    settings
+        .provider_display_order()
+        .into_iter()
+        .filter(|provider| crate::product_policy::is_visible_provider(*provider))
         .enumerate()
-        .filter_map(|(idx, id)| {
-            by_id.get(id).map(|p| ProviderSummary {
-                id: id.clone(),
-                display_name: p.display_name().to_string(),
-                enabled: settings.enabled_providers.contains(id),
-                order: idx as u32,
-            })
+        .map(|(idx, provider)| ProviderSummary {
+            id: provider.cli_name().to_string(),
+            display_name: provider.display_name().to_string(),
+            enabled: settings.is_provider_enabled(provider),
+            order: idx as u32,
         })
+        .collect()
+}
+
+pub(crate) fn merge_visible_provider_order(
+    settings: &Settings,
+    requested_ids: &[String],
+) -> Vec<String> {
+    let requested = requested_ids
+        .iter()
+        .filter_map(|provider_id| ProviderId::from_cli_name(provider_id))
+        .filter(|provider| crate::product_policy::is_visible_provider(*provider))
+        .collect::<Vec<_>>();
+    let mut requested = requested.into_iter();
+
+    settings
+        .provider_display_order()
+        .into_iter()
+        .map(|provider| {
+            if crate::product_policy::is_visible_provider(provider) {
+                requested.next().unwrap_or(provider)
+            } else {
+                provider
+            }
+        })
+        .map(|provider| provider.cli_name().to_string())
         .collect()
 }
 
@@ -40,8 +79,9 @@ pub fn reorder_providers(
     app: tauri::AppHandle,
     ids: Vec<String>,
 ) -> Result<Vec<ProviderSummary>, String> {
+    ensure_visible_desktop_providers(&ids)?;
     let mut settings = Settings::load();
-    settings.provider_order = codexbar::settings::normalize_provider_order(&ids);
+    settings.provider_order = merge_visible_provider_order(&settings, &ids);
     settings.save().map_err(|e| e.to_string())?;
     crate::tray_bridge::refresh_tray_presentation(&app);
     // Notify open surfaces (tray flyout, pop-out window) so their provider grid
@@ -95,6 +135,7 @@ pub(crate) fn provider_cookie_source_set(
 
 #[tauri::command]
 pub fn set_provider_cookie_source(provider_id: String, source: String) -> Result<(), String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     let source = source.trim();
     if source.is_empty()
         || !cookie_source_options_for(&provider_id, Language::English)
@@ -112,6 +153,7 @@ pub fn set_provider_cookie_source(provider_id: String, source: String) -> Result
 
 #[tauri::command]
 pub fn get_provider_cookie_source(provider_id: String) -> Result<Option<String>, String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     Ok(provider_cookie_source_lookup(
         &Settings::load(),
         &provider_id,
@@ -155,6 +197,7 @@ pub(crate) fn provider_region_set(
 
 #[tauri::command]
 pub fn set_provider_region(provider_id: String, region: String) -> Result<(), String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     let region = region.trim();
     if region.is_empty()
         || !region_options_for(&provider_id)
@@ -172,6 +215,7 @@ pub fn set_provider_region(provider_id: String, region: String) -> Result<(), St
 
 #[tauri::command]
 pub fn get_provider_region(provider_id: String) -> Result<Option<String>, String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     Ok(provider_region_lookup(&Settings::load(), &provider_id))
 }
 
@@ -189,6 +233,7 @@ fn workspace_provider(provider_id: &str) -> Option<codexbar::core::ProviderId> {
 
 #[tauri::command]
 pub fn set_provider_workspace_id(provider_id: String, workspace_id: String) -> Result<(), String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     let id = workspace_provider(&provider_id).ok_or_else(|| {
         format!("Provider '{provider_id}' does not expose a workspace/project id")
     })?;
@@ -236,9 +281,65 @@ fn litellm_workspace_change_allowed(
 
 #[cfg(test)]
 mod tests {
-    use codexbar::core::ProviderId;
+    use super::*;
 
-    use super::{litellm_workspace_change_allowed, workspace_provider};
+    #[test]
+    fn desktop_provider_guard_only_accepts_codex() {
+        for provider in ProviderId::all() {
+            let result = ensure_visible_desktop_provider(provider.cli_name());
+            assert_eq!(
+                result.is_ok(),
+                *provider == ProviderId::Codex,
+                "unexpected command access for {}",
+                provider.cli_name()
+            );
+        }
+
+        assert!(ensure_visible_desktop_provider("unknown").is_err());
+        assert!(
+            ensure_visible_desktop_providers(&[
+                ProviderId::Codex.cli_name().to_string(),
+                ProviderId::Claude.cli_name().to_string(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn codex_cookie_source_catalog_remains_available() {
+        assert_eq!(
+            ensure_visible_desktop_provider(ProviderId::Codex.cli_name()),
+            Ok(ProviderId::Codex)
+        );
+        assert!(
+            !cookie_source_options_for(ProviderId::Codex.cli_name(), Language::English).is_empty()
+        );
+    }
+
+    #[test]
+    fn hidden_provider_commands_fail_closed() {
+        let unavailable = |error: String| {
+            assert!(
+                error.contains("not available in desktop product"),
+                "unexpected error: {error}"
+            );
+        };
+
+        unavailable(set_provider_cookie_source("claude".into(), "auto".into()).unwrap_err());
+        unavailable(get_provider_cookie_source("claude".into()).unwrap_err());
+        unavailable(set_provider_region("alibaba".into(), "global".into()).unwrap_err());
+        unavailable(get_provider_region("alibaba".into()).unwrap_err());
+        unavailable(
+            set_provider_workspace_id("litellm".into(), "https://example.com".into()).unwrap_err(),
+        );
+        unavailable(get_provider_workspace_id("litellm".into()).unwrap_err());
+        unavailable(get_provider_gateway_url("wayfinder".into()).unwrap_err());
+        unavailable(
+            set_provider_gateway_url("wayfinder".into(), "https://example.com".into()).unwrap_err(),
+        );
+        unavailable(get_provider_cookie_source_options("claude".into()).unwrap_err());
+        unavailable(get_provider_region_options("alibaba".into()).unwrap_err());
+    }
 
     #[test]
     fn maps_opencode_go_workspace_provider() {
@@ -291,6 +392,7 @@ mod tests {
 
 #[tauri::command]
 pub fn get_provider_workspace_id(provider_id: String) -> Result<Option<String>, String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     let Some(id) = workspace_provider(&provider_id) else {
         return Ok(None);
     };
@@ -304,6 +406,7 @@ fn gateway_provider(provider_id: &str) -> Option<codexbar::core::ProviderId> {
 
 #[tauri::command]
 pub fn get_provider_gateway_url(provider_id: String) -> Result<Option<String>, String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     let Some(id) = gateway_provider(&provider_id) else {
         return Ok(None);
     };
@@ -312,6 +415,7 @@ pub fn get_provider_gateway_url(provider_id: String) -> Result<Option<String>, S
 
 #[tauri::command]
 pub fn set_provider_gateway_url(provider_id: String, gateway_url: String) -> Result<(), String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     let id = gateway_provider(&provider_id)
         .ok_or_else(|| format!("Provider '{provider_id}' does not expose a gateway URL"))?;
     let gateway_url = gateway_url.trim();
@@ -602,11 +706,13 @@ pub fn region_options_for(provider_id: &str) -> Vec<RegionOption> {
 pub fn get_provider_cookie_source_options(
     provider_id: String,
 ) -> Result<Vec<CookieSourceOption>, String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     let lang = Settings::load().ui_language;
     Ok(cookie_source_options_for(&provider_id, lang))
 }
 
 #[tauri::command]
 pub fn get_provider_region_options(provider_id: String) -> Result<Vec<RegionOption>, String> {
+    ensure_visible_desktop_provider(&provider_id)?;
     Ok(region_options_for(&provider_id))
 }

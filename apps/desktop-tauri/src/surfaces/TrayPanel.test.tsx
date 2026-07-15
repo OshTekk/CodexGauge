@@ -350,7 +350,10 @@ describe("TrayPanel provider grid", () => {
       },
     });
 
-    const { container } = renderTrayPanel([provider("codex", "Codex", 35)]);
+    const { container } = renderTrayPanel([
+      provider("codex", "Codex", 35),
+      provider("copilot", "GitHub Copilot", 20),
+    ]);
 
     await waitFor(() => {
       expect(
@@ -403,7 +406,6 @@ describe("TrayPanel provider grid", () => {
   });
 
   it.each([
-    [1, true],
     [2, true],
     [5, true],
     [6, false],
@@ -436,6 +438,36 @@ describe("TrayPanel provider grid", () => {
       );
     },
   );
+
+  it("shows every Codex rate window without a provider grid in mono-provider mode", async () => {
+    const codex = provider("codex", "Codex", 20);
+    codex.secondary = rateWindow(40);
+    codex.secondaryLabel = "Weekly";
+    codex.extraRateWindows = [
+      {
+        id: "codex-spark",
+        title: "Codex Spark 5-hour",
+        window: rateWindow(17),
+      },
+      {
+        id: "codex-spark-weekly",
+        title: "Codex Spark Weekly",
+        window: rateWindow(62),
+      },
+    ];
+
+    const { container } = renderTrayPanel(
+      [codex],
+      { enabledProviders: ["codex"], showAsUsed: false },
+    );
+
+    expect(await screen.findByText("Codex Spark Weekly")).toBeInTheDocument();
+    expect(screen.getByText("Codex Spark 5-hour")).toBeInTheDocument();
+    expect(container.querySelector(".provider-grid")).toBeNull();
+    expect(container.querySelectorAll(".menu-metric")).toHaveLength(4);
+    expect(screen.getByText("83% left")).toBeInTheDocument();
+    expect(screen.getByText("38% left")).toBeInTheDocument();
+  });
 
   it("only requests chart data for providers that can render charts", async () => {
     renderTrayPanel([
@@ -632,7 +664,7 @@ describe("TrayPanel provider grid", () => {
 
   it("provider grid indicator follows the show-as-used setting", async () => {
     const { container, rerender } = renderTrayPanel(
-      [provider("claude", "Claude", 35)],
+      [provider("codex", "Codex", 35), provider("claude", "Claude", 35)],
       { showAsUsed: true },
     );
 
@@ -644,6 +676,7 @@ describe("TrayPanel provider grid", () => {
     });
 
     tauriMocks.getCachedProviders.mockResolvedValue([
+      provider("codex", "Codex", 35),
       provider("claude", "Claude", 35),
     ]);
     tauriMocks.getSettingsSnapshot.mockResolvedValue(settings({ showAsUsed: false }));
@@ -817,7 +850,10 @@ describe("TrayPanel provider grid", () => {
       error: "Source mode `Cli` not supported for this provider",
     };
 
-    const { container } = renderTrayPanel([errorProvider]);
+    const { container } = renderTrayPanel([
+      provider("codex", "Codex", 20),
+      errorProvider,
+    ]);
 
     await waitFor(() => {
       expect(container.querySelector(".tray-panel-reveal--ready")).not.toBeNull();

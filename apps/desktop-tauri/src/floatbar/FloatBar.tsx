@@ -153,14 +153,14 @@ function CostPill({
 /**
  * The capacity pill shown for a single provider.
  *
- * Color follows usage: green default, amber when remaining drops below the
- * high-usage threshold, red when remaining is below the critical threshold
- * or the provider is exhausted.
+ * Color follows consumed usage independently from the displayed percentage:
+ * green by default, amber above the high threshold, and red above the
+ * critical threshold or when the provider is exhausted.
  */
 function ProviderPill({
   provider,
-  highRemaining,
-  critRemaining,
+  highUsageThreshold,
+  criticalUsageThreshold,
   showAsUsed,
   scale,
   showResetInline,
@@ -169,8 +169,8 @@ function ProviderPill({
   remainingSuffix,
 }: {
   provider: ProviderUsageSnapshot;
-  highRemaining: number;
-  critRemaining: number;
+  highUsageThreshold: number;
+  criticalUsageThreshold: number;
   showAsUsed: boolean;
   scale: number;
   showResetInline: boolean;
@@ -184,8 +184,8 @@ function ProviderPill({
   const displaySuffix = showAsUsed ? usedSuffix : remainingSuffix;
   const exhausted = provider.primary.isExhausted || provider.error;
   let tone: "ok" | "warn" | "crit" = "ok";
-  if (exhausted || remaining <= critRemaining) tone = "crit";
-  else if (remaining <= highRemaining) tone = "warn";
+  if (exhausted || used >= criticalUsageThreshold) tone = "crit";
+  else if (used >= highUsageThreshold) tone = "warn";
 
   const brand = getProviderIcon(provider.providerId).brandColor;
   const label = provider.error ? "—" : `${Math.round(displayPercent)}%`;
@@ -419,8 +419,14 @@ export default function FloatBar({ state }: { state: BootstrapState }) {
     [],
   );
 
-  const highRemaining = 100 - settings.highUsageThreshold;
-  const critRemaining = 100 - settings.criticalUsageThreshold;
+  const highUsageThreshold = Math.max(
+    0,
+    Math.min(100, settings.highUsageThreshold),
+  );
+  const criticalUsageThreshold = Math.max(
+    0,
+    Math.min(100, settings.criticalUsageThreshold),
+  );
   const opacityFraction = Math.max(0.3, Math.min(1, settings.floatBarOpacity / 100));
 
   return (
@@ -446,8 +452,8 @@ export default function FloatBar({ state }: { state: BootstrapState }) {
             <ProviderPill
               key={providerCostKey(p)}
               provider={p}
-              highRemaining={highRemaining}
-              critRemaining={critRemaining}
+              highUsageThreshold={highUsageThreshold}
+              criticalUsageThreshold={criticalUsageThreshold}
               showAsUsed={settings.showAsUsed}
               scale={scale}
               showResetInline={showResetInline}

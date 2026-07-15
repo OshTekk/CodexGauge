@@ -262,10 +262,10 @@ function paceStageKey(stage: PaceSnapshot["stage"]): LocaleKey {
 type UsageLevel = "normal" | "high" | "critical" | "exhausted";
 const WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 
-function levelOf(remainPct: number, exhausted: boolean): UsageLevel {
+function levelOf(usedPct: number, exhausted: boolean): UsageLevel {
   if (exhausted) return "exhausted";
-  if (remainPct <= 5) return "critical";
-  if (remainPct <= 25) return "high";
+  if (usedPct >= 95) return "critical";
+  if (usedPct >= 75) return "high";
   return "normal";
 }
 
@@ -324,11 +324,15 @@ function MetricRow({
   const isInformational = snap.isInformational === true;
   const usedPct = Number.isFinite(snap.usedPercent) ? Math.max(0, snap.usedPercent) : 0;
   const barPct = Math.min(100, usedPct);
-  const remain = 100 - usedPct;
-  const displayPct = showAsUsed ? usedPct : Math.max(0, remain);
-  const barDisplayPct = showAsUsed ? barPct : Math.max(0, Math.min(100, remain));
+  const remainingPct = Number.isFinite(snap.remainingPercent)
+    ? Math.max(0, snap.remainingPercent)
+    : 0;
+  const displayPct = showAsUsed ? usedPct : remainingPct;
+  const barDisplayPct = showAsUsed
+    ? barPct
+    : Math.min(100, remainingPct);
   const displayLabel = showAsUsed ? t("PanelUsedSuffix") : t("PanelLeftSuffix");
-  const level = levelOf(remain, snap.isExhausted);
+  const level = levelOf(usedPct, snap.isExhausted);
   const resetText = useFormattedResetTime(
     snap.resetsAt,
     snap.resetDescription,

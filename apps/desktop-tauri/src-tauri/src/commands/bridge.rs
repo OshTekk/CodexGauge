@@ -261,9 +261,15 @@ impl ProviderUsageSnapshot {
 /// Localization is done at render time so cached snapshots stay language-neutral.
 pub(crate) fn compact_tray_status_label(
     window: &RateWindowSnapshot,
+    show_as_used: bool,
     lang: codexbar::settings::Language,
 ) -> String {
-    let pct = format!("{:.0}%", window.used_percent);
+    let percent = if show_as_used {
+        window.used_percent
+    } else {
+        window.remaining_percent
+    };
+    let pct = format!("{percent:.0}%");
     if let Some(reset) = compact_reset_description(window, lang) {
         format!("{pct} • {reset}")
     } else {
@@ -482,20 +488,32 @@ pub fn get_settings_snapshot() -> SettingsSnapshot {
 
 impl From<Settings> for SettingsSnapshot {
     fn from(settings: Settings) -> Self {
-        let avoid_keychain_prompts = settings.claude_avoid_keychain_prompts();
         let codex_spark_usage_visible = settings.codex_spark_usage_visible();
-        let wayfinder_gateway_url = settings.gateway_url(ProviderId::Wayfinder).to_string();
 
         let provider_order = settings.provider_display_order_names();
         let enabled_providers = provider_order
             .iter()
+            .filter(|provider_id| crate::product_policy::is_visible_provider_cli_name(provider_id))
             .filter(|provider_id| settings.enabled_providers.contains(*provider_id))
             .cloned()
+            .collect();
+        let provider_order = provider_order
+            .into_iter()
+            .filter(|provider_id| crate::product_policy::is_visible_provider_cli_name(provider_id))
+            .collect();
+        let provider_usage_thresholds = settings
+            .provider_usage_thresholds
+            .iter()
+            .filter(|(key, _)| crate::product_policy::is_visible_provider_scoped_key(key))
+            .map(|(key, value)| (key.clone(), *value))
             .collect();
 
         let provider_metrics = settings
             .provider_metrics
             .into_iter()
+            .filter(|(provider_id, _)| {
+                crate::product_policy::is_visible_provider_cli_name(provider_id)
+            })
             .map(|(k, v)| (k, metric_preference_label(v)))
             .collect();
 
@@ -511,7 +529,7 @@ impl From<Settings> for SettingsSnapshot {
             sound_volume: settings.sound_volume,
             high_usage_threshold: settings.high_usage_threshold,
             critical_usage_threshold: settings.critical_usage_threshold,
-            provider_usage_thresholds: settings.provider_usage_thresholds,
+            provider_usage_thresholds,
             predictive_pace_warning_enabled: settings.predictive_pace_warning_enabled,
             tray_icon_mode: tray_icon_mode_label(settings.tray_icon_mode),
             switcher_shows_icons: settings.switcher_shows_icons,
@@ -536,10 +554,11 @@ impl From<Settings> for SettingsSnapshot {
             window_scale_percent: settings.window_scale_percent,
             tray_scale_percent: settings.tray_scale_percent,
             powertoys_status_pipe_enabled: settings.powertoys_status_pipe_enabled,
-            claude_avoid_keychain_prompts: avoid_keychain_prompts,
+            // Keep the bridge contract stable without exposing hidden-provider settings.
+            claude_avoid_keychain_prompts: false,
             codex_spark_usage_visible,
             disable_keychain_access: settings.disable_keychain_access,
-            wayfinder_gateway_url,
+            wayfinder_gateway_url: String::new(),
             provider_metrics,
             float_bar_enabled: settings.float_bar_enabled,
             float_bar_opacity: settings.float_bar_opacity,
@@ -547,7 +566,13 @@ impl From<Settings> for SettingsSnapshot {
             float_bar_orientation: settings.float_bar_orientation,
             float_bar_style: settings.float_bar_style,
             float_bar_click_through: settings.float_bar_click_through,
-            float_bar_provider_ids: settings.float_bar_provider_ids,
+            float_bar_provider_ids: settings
+                .float_bar_provider_ids
+                .into_iter()
+                .filter(|provider_id| {
+                    crate::product_policy::is_visible_provider_cli_name(provider_id)
+                })
+                .collect(),
             float_bar_dark_text: settings.float_bar_dark_text,
             float_bar_show_reset_inline: settings.float_bar_show_reset_inline,
             float_bar_show_cost: settings.float_bar_show_cost,
@@ -556,10 +581,8 @@ impl From<Settings> for SettingsSnapshot {
     }
 }
 
-pub(crate) fn provider_catalog_for(settings: &Settings) -> Vec<ProviderCatalogEntry> {
-    settings
-        .provider_display_order()
-        .into_iter()
+pub(crate) fn provider_catalog_for(_settings: &Settings) -> Vec<ProviderCatalogEntry> {
+    crate::product_policy::visible_provider_ids()
         .map(|provider| ProviderCatalogEntry {
             id: provider.cli_name().to_string(),
             display_name: provider.display_name().to_string(),
@@ -664,7 +687,7 @@ mod tests {
             Some("Jun 10 at 3:00PM".to_string()),
         );
 
-        let label = compact_tray_status_label(&window, Language::English);
+        let label = compact_tray_status_label(&window, true, Language::English);
 
         assert!(label.starts_with("13% • Resets in 2h "));
         assert!(label.ends_with('m'));
@@ -676,8 +699,18 @@ mod tests {
         let window = snapshot_window_with(8.0, Some(300), None, Some("2h 05m".to_string()));
 
         assert_eq!(
-            compact_tray_status_label(&window, Language::English),
+            compact_tray_status_label(&window, true, Language::English),
             "8% • Resets in 2h 05m"
+        );
+    }
+
+    #[test]
+    fn tray_status_displays_remaining_when_requested() {
+        let window = snapshot_window_with(8.0, Some(300), None, Some("2h 05m".to_string()));
+
+        assert_eq!(
+            compact_tray_status_label(&window, false, Language::English),
+            "92% • Resets in 2h 05m"
         );
     }
 
@@ -692,7 +725,7 @@ mod tests {
             None,
         );
 
-        let label = compact_tray_status_label(&window, Language::Japanese);
+        let label = compact_tray_status_label(&window, true, Language::Japanese);
 
         assert!(label.contains("リセットまで"), "{label}");
         assert!(!label.to_ascii_lowercase().contains("resets in"), "{label}");
@@ -706,7 +739,7 @@ mod tests {
         let window =
             snapshot_window_with(8.0, Some(300), None, Some("Resets in 2h 05m".to_string()));
 
-        let label = compact_tray_status_label(&window, Language::Japanese);
+        let label = compact_tray_status_label(&window, true, Language::Japanese);
 
         assert!(label.contains("リセットまで"), "{label}");
         assert!(!label.to_ascii_lowercase().contains("resets in"), "{label}");
@@ -722,14 +755,31 @@ mod tests {
             None,
         );
 
-        let english = compact_tray_status_label(&window, Language::English);
-        let japanese = compact_tray_status_label(&window, Language::Japanese);
+        let english = compact_tray_status_label(&window, true, Language::English);
+        let japanese = compact_tray_status_label(&window, true, Language::Japanese);
 
         assert!(english.contains("Resets in"), "{english}");
         assert!(japanese.contains("リセットまで"), "{japanese}");
         assert!(
             !japanese.to_ascii_lowercase().contains("resets in"),
             "{japanese}"
+        );
+    }
+
+    #[test]
+    fn settings_snapshot_neutralizes_hidden_provider_configuration() {
+        let mut settings = Settings::default();
+        settings.set_claude_avoid_keychain_prompts(true);
+        settings.set_gateway_url(ProviderId::Wayfinder, "https://wayfinder.example.test");
+
+        let snapshot = serde_json::to_value(SettingsSnapshot::from(settings.clone())).unwrap();
+
+        assert_eq!(snapshot["claudeAvoidKeychainPrompts"], false);
+        assert_eq!(snapshot["wayfinderGatewayUrl"], "");
+        assert!(settings.claude_avoid_keychain_prompts());
+        assert_eq!(
+            settings.gateway_url(ProviderId::Wayfinder),
+            "https://wayfinder.example.test"
         );
     }
 }

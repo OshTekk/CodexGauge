@@ -250,6 +250,38 @@ describe("PopOutPanel", () => {
     expect(container.querySelectorAll(".menu-stack__item")).toHaveLength(1);
   });
 
+  it("shows every Codex rate window without a provider grid in mono-provider mode", async () => {
+    const codex = provider("codex", "Codex", 20);
+    codex.secondary = rateWindow(40);
+    codex.secondaryLabel = "Weekly";
+    codex.extraRateWindows = [
+      {
+        id: "codex-spark",
+        title: "Codex Spark 5-hour",
+        window: rateWindow(17),
+      },
+      {
+        id: "codex-spark-weekly",
+        title: "Codex Spark Weekly",
+        window: rateWindow(62),
+      },
+    ];
+
+    const { container } = renderPopOut(
+      [codex],
+      undefined,
+      [],
+      { enabledProviders: ["codex"], showAsUsed: false },
+    );
+
+    expect(await screen.findByText("Codex Spark Weekly")).toBeInTheDocument();
+    expect(screen.getByText("Codex Spark 5-hour")).toBeInTheDocument();
+    expect(container.querySelector(".provider-grid")).toBeNull();
+    expect(container.querySelectorAll(".menu-metric")).toHaveLength(4);
+    expect(screen.getByText("83% left")).toBeInTheDocument();
+    expect(screen.getByText("38% left")).toBeInTheDocument();
+  });
+
   it("renders cleanly with the flyout-window rewiring for goTray's onClick", async () => {
     // goTray's onClick now calls openFlyoutWindow() (formerly
     // setSurfaceMode("trayPanel", ...)) — asserted directly against the mock

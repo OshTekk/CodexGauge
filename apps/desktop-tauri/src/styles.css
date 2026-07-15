@@ -2094,6 +2094,18 @@ body:has(.tray-panel-reveal) {
   transition: width 0.3s;
 }
 
+.provider-usage-bar__fill[data-level="high"] {
+  background: var(--usage-bar-high);
+}
+
+.provider-usage-bar__fill[data-level="critical"] {
+  background: var(--usage-bar-critical);
+}
+
+.provider-usage-bar__fill[data-level="exhausted"] {
+  background: var(--usage-bar-exhausted);
+}
+
 .provider-usage-bar__reset {
   font-size: 0.68rem;
   color: var(--text-muted);

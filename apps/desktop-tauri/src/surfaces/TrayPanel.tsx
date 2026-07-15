@@ -314,6 +314,7 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
   const fixedFlyoutSize = Array.isArray(flyoutSize) ? flyoutSize : null;
   const useWideColumns =
     selectedProviderId === null &&
+    visibleProviders.length > 1 &&
     fixedFlyoutSize !== null &&
     fixedFlyoutSize[0] >= 640;
   const wideColumns = useMemo(() => {
@@ -438,7 +439,7 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
           resetTimeRelative={settings.resetTimeRelative}
           showResetWhenExhausted={settings.showResetWhenExhausted}
           showAsUsed={settings.showAsUsed}
-          compactMetrics={selectedProviderId === null}
+          compactMetrics={selectedProviderId === null && sorted.length > 1}
           onLayoutChange={requestLayout}
         />
       </div>
@@ -482,19 +483,23 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
         style={{ zoom: trayScale }}
       >
         {settings.agentSessionsEnabled && <AgentSessions />}
-        <ProviderGrid
-          providers={expectsDenseOverview ? denseTrayProviders : sorted}
-          selectedProviderId={selectedProviderId}
-          showAsUsed={settings.showAsUsed}
-          showProviderIcons={settings.switcherShowsIcons}
-          expanded={gridExpanded}
-          onExpandedChange={setGridExpanded}
-          onSelect={handleGridClick}
-          onReorder={handleReorder}
-          onGestureStart={handleGestureStart}
-          onGestureEnd={handleGestureEnd}
-        />
-        <div className="provider-grid__divider" />
+        {sorted.length > 1 && (
+          <>
+            <ProviderGrid
+              providers={expectsDenseOverview ? denseTrayProviders : sorted}
+              selectedProviderId={selectedProviderId}
+              showAsUsed={settings.showAsUsed}
+              showProviderIcons={settings.switcherShowsIcons}
+              expanded={gridExpanded}
+              onExpandedChange={setGridExpanded}
+              onSelect={handleGridClick}
+              onReorder={handleReorder}
+              onGestureStart={handleGestureStart}
+              onGestureEnd={handleGestureEnd}
+            />
+            <div className="provider-grid__divider" />
+          </>
+        )}
         <div className="menu-stack">
           {useWideColumns
             ? wideColumns.map((column, index) => (

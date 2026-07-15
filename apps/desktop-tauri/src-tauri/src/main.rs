@@ -8,6 +8,7 @@ mod events;
 mod floatbar;
 mod geometry_store;
 mod powertoys;
+mod product_policy;
 mod proof_harness;
 mod shell;
 mod shortcut_bridge;

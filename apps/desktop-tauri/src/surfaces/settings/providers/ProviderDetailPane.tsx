@@ -47,6 +47,7 @@ interface Props {
   providerId: string | null;
   cookieDomain?: string | null;
   resetTimeRelative: boolean;
+  showAsUsed: boolean;
   providerMetrics: SettingsSnapshot["providerMetrics"];
   wayfinderGatewayUrl: string;
   settingsDisabled: boolean;
@@ -67,6 +68,7 @@ export function ProviderDetailPane({
   providerId,
   cookieDomain = null,
   resetTimeRelative,
+  showAsUsed,
   providerMetrics,
   wayfinderGatewayUrl,
   settingsDisabled,
@@ -295,6 +297,7 @@ export function ProviderDetailPane({
       <UsageSection
         provider={detail}
         resetTimeRelative={resetTimeRelative}
+        showAsUsed={showAsUsed}
         t={t}
       />
       {detail.id === "wayfinder" && (

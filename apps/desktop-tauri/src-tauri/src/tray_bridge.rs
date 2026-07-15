@@ -10,7 +10,9 @@ use tauri::menu::{CheckMenuItemBuilder, IsMenuItem, Menu, MenuItem, PredefinedMe
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
-use codexbar::tray::{render_bar_icon_rgba, render_percent_icon_rgba};
+use codexbar::tray::{
+    render_bar_icon_rgba_with_color_percent, render_percent_icon_rgba_with_color_percent,
+};
 
 use crate::shell;
 use crate::state::{AppState, TrayAnchor};
@@ -161,11 +163,20 @@ fn resolve_menu_target(id: &str) -> Option<shell::ShellTransitionRequest> {
         // against the `main`-window surface-mode machine. `SurfaceMode::TrayPanel`
         // remains as a data key (geometry-key / window_properties source /
         // panel-size reference) but `main` no longer transitions into it.
-        _ if id.starts_with("provider:") => Some(shell::ShellTransitionRequest {
-            mode: SurfaceMode::PopOut,
-            target: SurfaceTarget::parse(id)?,
-            position: None,
-        }),
+        _ if id.starts_with("provider:") => {
+            let target = SurfaceTarget::parse(id)?;
+            let SurfaceTarget::Provider { provider_id } = &target else {
+                return None;
+            };
+            if !crate::product_policy::is_visible_provider_cli_name(provider_id) {
+                return None;
+            }
+            Some(shell::ShellTransitionRequest {
+                mode: SurfaceMode::PopOut,
+                target,
+                position: None,
+            })
+        }
         _ => None,
     }
 }
@@ -201,7 +212,8 @@ fn resolve_menu_action(id: &str) -> Option<MenuAction> {
         "pop_out" => Some(MenuAction::OpenFlyout),
         _ if id.starts_with("toggle_provider:") => {
             let provider_id = id["toggle_provider:".len()..].to_string();
-            Some(MenuAction::ToggleProvider(provider_id))
+            crate::product_policy::is_visible_provider_cli_name(&provider_id)
+                .then_some(MenuAction::ToggleProvider(provider_id))
         }
         _ => resolve_menu_target(id).map(MenuAction::Transition),
     }
@@ -433,7 +445,7 @@ fn presentation_snapshots(
     snapshots: &[crate::commands::ProviderUsageSnapshot],
     spark_usage_visible: bool,
 ) -> Vec<crate::commands::ProviderUsageSnapshot> {
-    let mut snapshots = snapshots.to_vec();
+    let mut snapshots = crate::commands::visible_provider_snapshots(snapshots);
     for snapshot in &mut snapshots {
         crate::commands::filter_hidden_codex_spark_rows(snapshot, spark_usage_visible);
     }
@@ -485,13 +497,30 @@ pub fn update_tray_icon_and_tooltip(
             None,
         ),
     };
+    let (session_used_pct, weekly_used_pct) = match picked {
+        Some(s) => selected_tray_used_percents(s, &settings),
+        None => (
+            ok_snapshots
+                .iter()
+                .map(|s| selected_tray_used_percents(s, &settings).0)
+                .fold(0.0_f64, f64::max),
+            None,
+        ),
+    };
 
-    let (rgba, w, h) = render_tray_icon_for_settings(&settings, session_pct, weekly_pct, all_error);
+    let (rgba, w, h) = render_tray_icon_for_settings(
+        &settings,
+        session_pct,
+        weekly_pct,
+        session_used_pct,
+        weekly_used_pct,
+        all_error,
+    );
     let icon = Image::new_owned(rgba, w, h);
     let _ = tray.set_icon(Some(icon));
 
     // ── Tooltip ───────────────────────────────────────────────────────────
-    let tooltip = build_tooltip(&snapshots, settings.ui_language);
+    let tooltip = build_tooltip(&snapshots, settings.show_as_used, settings.ui_language);
     let _ = tray.set_tooltip(Some(tooltip));
 }
 
@@ -508,7 +537,7 @@ fn status_labels_for_settings(
     if settings.tray_icon_mode == TrayIconMode::PerProvider {
         return healthy
             .into_iter()
-            .map(|s| provider_status_label(s, lang))
+            .map(|s| provider_status_label(s, settings.show_as_used, lang))
             .collect::<Vec<_>>();
     }
 
@@ -519,7 +548,7 @@ fn status_labels_for_settings(
         return vec![];
     };
 
-    let (_, label) = provider_status_label(selected, lang);
+    let (_, label) = provider_status_label(selected, settings.show_as_used, lang);
     vec![("status_summary".to_string(), label)]
 }
 
@@ -549,9 +578,10 @@ fn ordered_snapshot_refs<'a>(
 
 fn provider_status_label(
     snapshot: &crate::commands::ProviderUsageSnapshot,
+    show_as_used: bool,
     lang: codexbar::settings::Language,
 ) -> (String, String) {
-    let label = crate::commands::compact_tray_status_label(&snapshot.primary, lang);
+    let label = crate::commands::compact_tray_status_label(&snapshot.primary, show_as_used, lang);
     (
         snapshot.provider_id.clone(),
         format!("{} {}", snapshot.display_name, label),
@@ -562,12 +592,20 @@ fn render_tray_icon_for_settings(
     settings: &Settings,
     session_pct: f64,
     weekly_pct: Option<f64>,
+    session_used_pct: f64,
+    weekly_used_pct: Option<f64>,
     all_error: bool,
 ) -> (Vec<u8>, u32, u32) {
     if settings.menu_bar_shows_percent {
-        render_percent_icon_rgba(session_pct, all_error)
+        render_percent_icon_rgba_with_color_percent(session_pct, session_used_pct, all_error)
     } else {
-        render_bar_icon_rgba(session_pct, weekly_pct, all_error)
+        render_bar_icon_rgba_with_color_percent(
+            session_pct,
+            weekly_pct,
+            session_used_pct,
+            weekly_used_pct,
+            all_error,
+        )
     }
 }
 
@@ -598,6 +636,18 @@ fn selected_tray_percents(
     snapshot: &crate::commands::ProviderUsageSnapshot,
     settings: &Settings,
 ) -> (f64, Option<f64>) {
+    let (primary, secondary) = selected_tray_used_percents(snapshot, settings);
+
+    (
+        display_metric_percent(primary, settings.show_as_used),
+        secondary.map(|percent| display_metric_percent(percent, settings.show_as_used)),
+    )
+}
+
+fn selected_tray_used_percents(
+    snapshot: &crate::commands::ProviderUsageSnapshot,
+    settings: &Settings,
+) -> (f64, Option<f64>) {
     let provider = ProviderId::from_cli_name(snapshot.provider_id.as_str());
     let preference = provider
         .map(|id| settings.get_provider_metric(id))
@@ -609,12 +659,9 @@ fn selected_tray_percents(
     let secondary = snapshot
         .secondary
         .as_ref()
-        .map(|w| display_metric_percent(w.used_percent, settings.show_as_used));
+        .map(|w| display_metric_percent(w.used_percent, true));
 
-    (
-        display_metric_percent(primary, settings.show_as_used),
-        secondary,
-    )
+    (display_metric_percent(primary, true), secondary)
 }
 
 fn display_metric_percent(used_percent: f64, show_as_used: bool) -> f64 {
@@ -716,6 +763,7 @@ fn max_metric_percent<const N: usize>(values: [Option<f64>; N]) -> Option<f64> {
 /// Build a compact multi-line tooltip string from provider snapshots.
 fn build_tooltip(
     snapshots: &[crate::commands::ProviderUsageSnapshot],
+    show_as_used: bool,
     lang: codexbar::settings::Language,
 ) -> String {
     use codexbar::locale::{LocaleKey, get_text};
@@ -731,7 +779,7 @@ fn build_tooltip(
             let short = truncate_tooltip_text(err, 36);
             format!("{}: {} ({})", s.display_name, error_label, short)
         } else {
-            let label = crate::commands::compact_tray_status_label(&s.primary, lang);
+            let label = crate::commands::compact_tray_status_label(&s.primary, show_as_used, lang);
             format!("{}: {}", s.display_name, truncate_tooltip_text(&label, 42))
         };
         lines.push(status);
@@ -1174,6 +1222,7 @@ mod tests {
     fn status_labels_per_provider_mode_lists_each_healthy_provider() {
         let settings = Settings {
             tray_icon_mode: TrayIconMode::PerProvider,
+            show_as_used: true,
             provider_order: codexbar::settings::normalize_provider_order(&[
                 "claude".to_string(),
                 "codex".to_string(),
@@ -1205,6 +1254,7 @@ mod tests {
         let settings = Settings {
             tray_icon_mode: TrayIconMode::Single,
             menu_bar_shows_highest_usage: true,
+            show_as_used: true,
             ..Settings::default()
         };
         let snapshots = vec![
@@ -1225,6 +1275,51 @@ mod tests {
     }
 
     #[test]
+    fn native_menu_rejects_hidden_provider_actions() {
+        assert!(resolve_menu_target("provider:claude").is_none());
+        assert!(resolve_menu_action("toggle_provider:claude").is_none());
+        assert!(resolve_menu_target("provider:codex").is_some());
+        assert!(matches!(
+            resolve_menu_action("toggle_provider:codex"),
+            Some(MenuAction::ToggleProvider(provider_id)) if provider_id == "codex"
+        ));
+    }
+
+    #[test]
+    fn tray_presentation_only_includes_codex() {
+        let snapshots = vec![
+            fake_snapshot("claude", "Claude", 72.0),
+            fake_snapshot("codex", "Codex", 30.0),
+        ];
+
+        let visible = presentation_snapshots(&snapshots, true);
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].provider_id, ProviderId::Codex.cli_name());
+    }
+
+    #[test]
+    fn status_labels_use_remaining_percent_when_requested() {
+        let settings = Settings {
+            tray_icon_mode: TrayIconMode::Single,
+            show_as_used: false,
+            ..Settings::default()
+        };
+        let snapshots = vec![fake_snapshot("codex", "Codex", 8.0)];
+
+        let labels = status_labels_for_settings(
+            &settings,
+            &snapshots,
+            codexbar::settings::Language::English,
+        );
+
+        assert_eq!(
+            labels,
+            vec![("status_summary".to_string(), "Codex 92%".to_string())]
+        );
+    }
+
+    #[test]
     fn tray_icon_renderer_uses_percent_mode_when_enabled() {
         let bar_settings = Settings {
             menu_bar_shows_percent: false,
@@ -1236,12 +1331,42 @@ mod tests {
         };
 
         let (bar, bar_w, bar_h) =
-            render_tray_icon_for_settings(&bar_settings, 72.0, Some(40.0), false);
-        let (percent, pct_w, pct_h) =
-            render_tray_icon_for_settings(&percent_settings, 72.0, Some(40.0), false);
+            render_tray_icon_for_settings(&bar_settings, 72.0, Some(40.0), 72.0, Some(40.0), false);
+        let (percent, pct_w, pct_h) = render_tray_icon_for_settings(
+            &percent_settings,
+            72.0,
+            Some(40.0),
+            72.0,
+            Some(40.0),
+            false,
+        );
 
         assert_eq!((bar_w, bar_h), (pct_w, pct_h));
         assert_ne!(bar, percent);
+    }
+
+    #[test]
+    fn tray_icon_full_remaining_fill_uses_low_consumption_color() {
+        let settings = Settings {
+            menu_bar_shows_percent: false,
+            show_as_used: false,
+            ..Settings::default()
+        };
+
+        let (rgba, width, _) =
+            render_tray_icon_for_settings(&settings, 100.0, None, 0.0, None, false);
+        let pixel_index = ((16 * width + 8) * 4) as usize;
+        let expected = codexbar::tray::icon::UsageLevel::Low.color();
+        let critical = codexbar::tray::icon::UsageLevel::Critical.color();
+
+        assert_eq!(
+            &rgba[pixel_index..pixel_index + 3],
+            &[expected.0, expected.1, expected.2]
+        );
+        assert_ne!(
+            &rgba[pixel_index..pixel_index + 3],
+            &[critical.0, critical.1, critical.2]
+        );
     }
 
     #[test]
@@ -1251,7 +1376,11 @@ mod tests {
         let mut codex = fake_snapshot("codex", "Codex", 8.0);
         codex.primary.reset_description = Some("4h 10m".to_string());
 
-        let tooltip = build_tooltip(&[claude, codex], codexbar::settings::Language::English);
+        let tooltip = build_tooltip(
+            &[claude, codex],
+            true,
+            codexbar::settings::Language::English,
+        );
 
         assert_eq!(
             tooltip,
@@ -1260,12 +1389,22 @@ mod tests {
     }
 
     #[test]
+    fn tooltip_uses_remaining_percent_when_requested() {
+        let mut codex = fake_snapshot("codex", "Codex", 8.0);
+        codex.primary.reset_description = Some("4h 10m".to_string());
+
+        let tooltip = build_tooltip(&[codex], false, codexbar::settings::Language::English);
+
+        assert_eq!(tooltip, "CodexBar\nCodex: 92% • Resets in 4h 10m");
+    }
+
+    #[test]
     fn tooltip_truncates_long_provider_lines() {
         let mut claude = fake_snapshot("claude", "Claude", 13.0);
         claude.primary.reset_description =
             Some("resets in Jun 10 at 3:00PM with extra noisy suffix".to_string());
 
-        let tooltip = build_tooltip(&[claude], codexbar::settings::Language::English);
+        let tooltip = build_tooltip(&[claude], true, codexbar::settings::Language::English);
 
         let line = tooltip.lines().nth(1).expect("provider tooltip line");
         assert!(line.starts_with("Claude: 13% • Resets in Jun 10 at 3:00PM"));
@@ -1278,7 +1417,7 @@ mod tests {
         let mut claude = fake_snapshot("claude", "Claude", 13.0);
         claude.error = Some("network timeout".to_string());
 
-        let tooltip = build_tooltip(&[claude], codexbar::settings::Language::Japanese);
+        let tooltip = build_tooltip(&[claude], true, codexbar::settings::Language::Japanese);
 
         assert!(tooltip.contains("エラー"), "{tooltip}");
         assert!(!tooltip.contains(": error ("), "{tooltip}");
@@ -1290,10 +1429,16 @@ mod tests {
         claude.primary.resets_at =
             Some((chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339());
 
-        let english_tooltip =
-            build_tooltip(&[claude.clone()], codexbar::settings::Language::English);
-        let japanese_tooltip =
-            build_tooltip(&[claude.clone()], codexbar::settings::Language::Japanese);
+        let english_tooltip = build_tooltip(
+            &[claude.clone()],
+            true,
+            codexbar::settings::Language::English,
+        );
+        let japanese_tooltip = build_tooltip(
+            &[claude.clone()],
+            true,
+            codexbar::settings::Language::Japanese,
+        );
 
         assert!(english_tooltip.contains("Resets in"), "{english_tooltip}");
         assert!(
@@ -1306,16 +1451,19 @@ mod tests {
         );
 
         let (_, english_label) =
-            provider_status_label(&claude, codexbar::settings::Language::English);
+            provider_status_label(&claude, true, codexbar::settings::Language::English);
         let (_, japanese_label) =
-            provider_status_label(&claude, codexbar::settings::Language::Japanese);
+            provider_status_label(&claude, true, codexbar::settings::Language::Japanese);
         assert!(english_label.contains("Resets in"), "{english_label}");
         assert!(japanese_label.contains("リセットまで"), "{japanese_label}");
     }
 
     #[test]
     fn selected_tray_percent_uses_cursor_extra_usage_cost() {
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            show_as_used: true,
+            ..Settings::default()
+        };
         settings.set_provider_metric(ProviderId::Cursor, MetricPreference::ExtraUsage);
         let snapshot = fake_snapshot_with(
             "cursor",
@@ -1334,7 +1482,10 @@ mod tests {
 
     #[test]
     fn selected_tray_percent_tracks_extra_rate_window() {
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            show_as_used: true,
+            ..Settings::default()
+        };
         settings.set_provider_metric(ProviderId::Copilot, MetricPreference::ExtraUsage);
         let mut snapshot = fake_snapshot("copilot", "Copilot", 20.0);
         snapshot.extra_rate_windows.push(fake_extra_window(42.0));
@@ -1347,7 +1498,10 @@ mod tests {
 
     #[test]
     fn copilot_automatic_tracks_highest_extra_rate_window() {
-        let settings = Settings::default();
+        let settings = Settings {
+            show_as_used: true,
+            ..Settings::default()
+        };
         let mut snapshot = fake_snapshot("copilot", "Copilot", 20.0);
         snapshot.extra_rate_windows.push(fake_extra_window(42.0));
 
@@ -1380,7 +1534,10 @@ mod tests {
 
     #[test]
     fn selected_tray_percent_falls_back_when_extra_usage_missing() {
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            show_as_used: true,
+            ..Settings::default()
+        };
         settings.set_provider_metric(ProviderId::Cursor, MetricPreference::ExtraUsage);
         let snapshot = fake_snapshot_with("cursor", "Cursor", 10.0, Some(72.0), None, None);
 

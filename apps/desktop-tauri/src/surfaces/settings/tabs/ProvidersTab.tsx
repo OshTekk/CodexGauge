@@ -50,13 +50,9 @@ export default function ProvidersTab({
   );
 
   const toggle = (id: string, on: boolean) => {
-    const next = new Set(enabled);
-    if (on) next.add(id);
-    else next.delete(id);
+    const next = updateEnabledProviderIds(settings.enabledProviders, id, on);
     set({
-      enabledProviders: orderedProviders
-        .map((provider) => provider.id)
-        .filter((providerId) => next.has(providerId)),
+      enabledProviders: next,
     });
   };
 
@@ -71,10 +67,10 @@ export default function ProvidersTab({
         enabled: isOn,
         status: deriveProviderStatus(isOn, snap),
         subtitlePrimary: providerSidebarSubtitle(p.id, isOn, snap, t),
-        subtitleSecondary: providerSidebarMetric(snap),
+        subtitleSecondary: providerSidebarMetric(snap, settings.showAsUsed),
       };
     });
-  }, [enabled, orderedProviders, snapshots, t]);
+  }, [enabled, orderedProviders, settings.showAsUsed, snapshots, t]);
 
   const normalizedSearch = searchText.trim().toLowerCase();
   const visibleRows = useMemo(
@@ -136,6 +132,7 @@ export default function ProvidersTab({
         providerId={selectedId}
         cookieDomain={selectedEntry?.cookieDomain ?? null}
         resetTimeRelative={settings.resetTimeRelative}
+        showAsUsed={settings.showAsUsed}
         providerMetrics={settings.providerMetrics}
         wayfinderGatewayUrl={settings.wayfinderGatewayUrl ?? "http://127.0.0.1:8088"}
         settingsDisabled={saving}
@@ -249,14 +246,27 @@ function providerSourceHintShort(
   }
 }
 
-function providerSidebarMetric(
+export function providerSidebarMetric(
   snap: ProviderUsageSnapshot | null,
+  showAsUsed: boolean,
 ): string | undefined {
   if (!snap) return undefined;
   const rate = snap.primary;
   if (!rate) return undefined;
-  if (Number.isFinite(rate.usedPercent)) {
-    return `${Math.round(Math.max(0, rate.usedPercent))}%`;
+  const percent = showAsUsed ? rate.usedPercent : rate.remainingPercent;
+  if (Number.isFinite(percent)) {
+    return `${Math.round(Math.max(0, percent))}%`;
   }
   return undefined;
+}
+
+export function updateEnabledProviderIds(
+  current: string[],
+  providerId: string,
+  enabled: boolean,
+): string[] {
+  const next = new Set(current);
+  if (enabled) next.add(providerId);
+  else next.delete(providerId);
+  return Array.from(next);
 }

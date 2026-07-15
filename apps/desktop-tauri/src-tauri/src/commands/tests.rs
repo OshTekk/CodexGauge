@@ -153,19 +153,20 @@ fn apply_provider_order_ignores_unknown_ids() {
 }
 
 #[test]
-fn provider_summaries_reflect_settings_order() {
-    let canonical_len = codexbar::core::ProviderId::all().len();
-    let s = Settings::default();
-    let summaries: Vec<ProviderSummary> = super::build_provider_summaries(&s);
-    assert_eq!(summaries.len(), canonical_len);
-    // Index is assigned in emission order.
-    for (i, s) in summaries.iter().enumerate() {
-        assert_eq!(s.order, i as u32);
-    }
+fn provider_summaries_only_expose_codex() {
+    let mut settings = Settings::default();
+    settings.enabled_providers.insert("claude".to_string());
+
+    let summaries: Vec<ProviderSummary> = super::build_provider_summaries(&settings);
+
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].id, ProviderId::Codex.cli_name());
+    assert!(summaries[0].enabled);
+    assert_eq!(summaries[0].order, 0);
 }
 
 #[test]
-fn provider_catalog_preserves_partial_config_order() {
+fn provider_catalog_only_returns_codex() {
     let settings = Settings {
         provider_order: codexbar::settings::normalize_provider_order(&[
             "gemini".to_string(),
@@ -177,19 +178,13 @@ fn provider_catalog_preserves_partial_config_order() {
 
     let catalog = super::provider_catalog_for(&settings);
 
-    assert_eq!(
-        catalog
-            .iter()
-            .take(3)
-            .map(|provider| provider.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["gemini", "claude", "codex"]
-    );
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].id, ProviderId::Codex.cli_name());
 }
 
 #[test]
-fn settings_snapshot_preserves_partial_config_order_for_enabled_providers() {
-    let settings = Settings {
+fn settings_snapshot_hides_enabled_providers_outside_product_policy() {
+    let mut settings = Settings {
         enabled_providers: ["gemini", "claude", "codex"]
             .into_iter()
             .map(str::to_string)
@@ -199,29 +194,72 @@ fn settings_snapshot_preserves_partial_config_order_for_enabled_providers() {
             "claude".to_string(),
             "codex".to_string(),
         ]),
+        float_bar_provider_ids: vec!["claude".to_string(), "codex".to_string()],
         ..Settings::default()
     };
+    settings.provider_metrics.insert(
+        ProviderId::Claude.cli_name().to_string(),
+        codexbar::settings::MetricPreference::Weekly,
+    );
+    settings.provider_metrics.insert(
+        ProviderId::Codex.cli_name().to_string(),
+        codexbar::settings::MetricPreference::Session,
+    );
+    settings.provider_usage_thresholds.insert(
+        "claude:weekly".to_string(),
+        codexbar::settings::UsageThresholdOverride {
+            high: Some(60.0),
+            critical: Some(80.0),
+        },
+    );
+    settings.provider_usage_thresholds.insert(
+        "codex:weekly".to_string(),
+        codexbar::settings::UsageThresholdOverride {
+            high: Some(75.0),
+            critical: Some(95.0),
+        },
+    );
 
     let snapshot = serde_json::to_value(super::SettingsSnapshot::from(settings)).unwrap();
 
+    assert_eq!(snapshot["providerOrder"], serde_json::json!(["codex"]));
+    assert_eq!(snapshot["enabledProviders"], serde_json::json!(["codex"]));
     assert_eq!(
-        snapshot["providerOrder"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .take(3)
-            .map(|value| value.as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["gemini", "claude", "codex"],
+        snapshot["floatBarProviderIds"],
+        serde_json::json!(["codex"])
     );
     assert_eq!(
-        snapshot["enabledProviders"]
-            .as_array()
-            .unwrap()
+        snapshot["providerMetrics"],
+        serde_json::json!({"codex": "session"})
+    );
+    assert_eq!(
+        snapshot["providerUsageThresholds"],
+        serde_json::json!({
+            "codex:weekly": {"high": 75.0, "critical": 95.0}
+        })
+    );
+}
+
+#[test]
+fn visible_reorder_preserves_hidden_provider_order() {
+    let settings = Settings {
+        provider_order: codexbar::settings::normalize_provider_order(&[
+            "gemini".to_string(),
+            "claude".to_string(),
+            "codex".to_string(),
+        ]),
+        ..Settings::default()
+    };
+
+    let merged = super::merge_visible_provider_order(&settings, &["codex".to_string()]);
+
+    assert_eq!(
+        merged
             .iter()
-            .map(|value| value.as_str().unwrap())
+            .take(3)
+            .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["gemini", "claude", "codex"],
+        vec!["gemini", "claude", "codex"]
     );
 }
 
@@ -1060,14 +1098,11 @@ fn external_url_validator_rejects_non_web_and_control_urls() {
 
 // ── Phase 13 — E2E IPC harness ─────────────────────────────────
 //
-// Build the full bootstrap payload and prove that every shared
-// `ProviderId` variant ends up in the provider catalog with a
-// non-empty id + display name. If a new provider is added to the
-// enum but never wired through the desktop catalog, this test will
-// fail with `missing provider in bootstrap catalog: <id>`.
+// Build the full bootstrap payload and prove that the desktop product
+// exposes only its visible provider with a non-empty id + display name.
 
 #[test]
-fn bootstrap_payload_exposes_every_provider_variant() {
+fn bootstrap_payload_only_exposes_codex() {
     let payload = super::get_bootstrap_state();
 
     let catalog_ids: std::collections::HashSet<String> = payload
@@ -1085,18 +1120,11 @@ fn bootstrap_payload_exposes_every_provider_variant() {
         );
     }
 
-    for provider in ProviderId::all() {
-        let expected = provider.cli_name().to_string();
-        assert!(
-            catalog_ids.contains(&expected),
-            "missing provider in bootstrap catalog: {expected}"
-        );
-    }
-
     assert_eq!(
-        catalog_ids.len(),
-        ProviderId::all().len(),
-        "bootstrap catalog size drifted from ProviderId::all()"
+        catalog_ids,
+        [ProviderId::Codex.cli_name().to_string()]
+            .into_iter()
+            .collect()
     );
 
     // Sanity — payload must also round-trip through JSON cleanly so

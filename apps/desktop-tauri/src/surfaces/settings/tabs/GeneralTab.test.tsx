@@ -118,6 +118,24 @@ describe("GeneralTab language picker", () => {
     expect(set).toHaveBeenCalledWith({ predictivePaceWarningEnabled: true });
   });
 
+  it("shows notification threshold overrides for Codex only", () => {
+    render(
+      <GeneralTab
+        mode="notifications"
+        settings={settings}
+        set={vi.fn()}
+        saving={false}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("spinbutton", { name: /ProviderNameCodex/ }),
+    ).toHaveLength(6);
+    expect(
+      screen.queryByRole("spinbutton", { name: /ProviderNameClaude/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("saves a window override on blur and clears it to resume inheritance", () => {
     const set = vi.fn();
     const { rerender } = render(

@@ -144,7 +144,23 @@ impl SettingsPatch {
             settings.float_bar_click_through = v;
         }
         if let Some(v) = &self.provider_ids {
-            settings.float_bar_provider_ids = v.clone();
+            let mut merged = settings
+                .float_bar_provider_ids
+                .iter()
+                .filter(|provider_id| {
+                    !crate::product_policy::is_visible_provider_cli_name(provider_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            merged.extend(
+                v.iter()
+                    .filter_map(|provider_id| {
+                        codexbar::core::ProviderId::from_cli_name(provider_id)
+                    })
+                    .filter(|provider| crate::product_policy::is_visible_provider(*provider))
+                    .map(|provider| provider.cli_name().to_string()),
+            );
+            settings.float_bar_provider_ids = merged;
         }
         if let Some(v) = self.dark_text {
             settings.float_bar_dark_text = v;
@@ -253,5 +269,29 @@ mod tests {
             s.float_bar_show_reset_inline,
             original.float_bar_show_reset_inline
         );
+    }
+
+    #[test]
+    fn provider_filter_patch_preserves_hidden_provider_ids() {
+        let mut settings = Settings {
+            float_bar_provider_ids: vec!["claude".into(), "codex".into()],
+            ..Settings::default()
+        };
+
+        SettingsPatch {
+            provider_ids: Some(Vec::new()),
+            ..SettingsPatch::default()
+        }
+        .apply(&mut settings);
+
+        assert_eq!(settings.float_bar_provider_ids, vec!["claude"]);
+
+        SettingsPatch {
+            provider_ids: Some(vec!["gemini".into(), "codex".into()]),
+            ..SettingsPatch::default()
+        }
+        .apply(&mut settings);
+
+        assert_eq!(settings.float_bar_provider_ids, vec!["claude", "codex"]);
     }
 }
