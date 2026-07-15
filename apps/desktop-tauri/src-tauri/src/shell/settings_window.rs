@@ -7,6 +7,12 @@ const SETTINGS_LABEL: &str = "settings";
 const SETTINGS_WIDTH: f64 = 720.0;
 const SETTINGS_HEIGHT: f64 = 580.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseRequestAction {
+    PassThrough,
+    PreventAndHide,
+}
+
 /// Open the detached Settings window, or focus it if already open.
 ///
 /// When the window already exists, emits `settings-change-tab` so the
@@ -65,4 +71,51 @@ pub fn dismiss(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<
         mode == crate::surface::SurfaceMode::Settings
     })?;
     Ok(())
+}
+
+/// Handle native events for the detached Settings window.
+///
+/// A close request is always converted into a hide operation. Keeping the
+/// window alive makes its title-bar close button equivalent to the in-app
+/// dismiss action and prevents a window close from affecting app lifetime.
+pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) -> bool {
+    if close_request_action(window.label()) == CloseRequestAction::PassThrough {
+        return false;
+    }
+
+    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        api.prevent_close();
+        let _ = window.hide();
+    }
+
+    true
+}
+
+fn close_request_action(window_label: &str) -> CloseRequestAction {
+    if window_label == SETTINGS_LABEL {
+        CloseRequestAction::PreventAndHide
+    } else {
+        CloseRequestAction::PassThrough
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_only_settings_close_policy_hides_instead_of_closing() {
+        assert_eq!(
+            close_request_action(SETTINGS_LABEL),
+            CloseRequestAction::PreventAndHide
+        );
+        assert_eq!(
+            close_request_action("main"),
+            CloseRequestAction::PassThrough
+        );
+        assert_eq!(
+            close_request_action("flyout"),
+            CloseRequestAction::PassThrough
+        );
+    }
 }

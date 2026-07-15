@@ -171,6 +171,7 @@ impl ProofCommand {
             _ => {
                 if let Some(provider_id) = raw.strip_prefix("open-provider:")
                     && is_supported_provider_id(provider_id)
+                    && crate::product_policy::is_visible_provider_cli_name(provider_id)
                 {
                     return Some(Self::OpenProvider {
                         provider_id: provider_id.to_string(),
@@ -373,6 +374,11 @@ fn open_proof_provider(
     app: &AppHandle,
     provider_id: String,
 ) -> Result<ProofCommandOutcome, String> {
+    if !crate::product_policy::is_visible_provider_cli_name(&provider_id) {
+        return Err(format!(
+            "provider '{provider_id}' is not available in the desktop product"
+        ));
+    }
     shell::transition_to_target(
         app,
         SurfaceMode::PopOut,
@@ -445,7 +451,9 @@ fn transition_about_path(app: &AppHandle) -> Result<(), String> {
 }
 
 fn persist_about_path_snapshot(result: Result<(), String>) -> Result<(), String> {
-    persist_about_path_snapshot_for_item("about", result)
+    // About remains a valid proof destination inside Settings, but the
+    // tray-only native menu exposes only the top-level Settings entry.
+    persist_about_path_snapshot_for_item("settings", result)
 }
 
 fn persist_about_path_snapshot_for_item(
@@ -590,7 +598,10 @@ fn proof_payload_is_supported(surface_mode: SurfaceMode, payload: Option<&str>) 
 
             match target {
                 SurfaceTarget::Dashboard => true,
-                SurfaceTarget::Provider { provider_id } => is_supported_provider_id(&provider_id),
+                SurfaceTarget::Provider { provider_id } => {
+                    is_supported_provider_id(&provider_id)
+                        && crate::product_policy::is_visible_provider_cli_name(&provider_id)
+                }
                 _ => false,
             }
         }
@@ -795,6 +806,14 @@ mod tests {
     }
 
     #[test]
+    fn proof_mode_rejects_hidden_provider() {
+        assert!(ProofCommand::parse("open-provider:claude").is_none());
+        with_proof_mode_env(Some("popOut:provider:claude"), || {
+            assert!(ProofConfig::from_env().is_none());
+        });
+    }
+
+    #[test]
     fn parse_proof_command_rejects_unknown_settings_tab() {
         assert!(ProofCommand::parse("open-settings:security").is_none());
     }
@@ -809,11 +828,16 @@ mod tests {
         assert!(result.is_ok());
         let snapshot = menu_snapshot();
         assert_eq!(snapshot.menu_path.as_deref(), Some("tray"));
-        let about_label = codexbar::locale::get_text(
+        let settings_label = codexbar::locale::get_text(
             codexbar::settings::Settings::load().ui_language,
-            codexbar::locale::LocaleKey::MenuAbout,
+            codexbar::locale::LocaleKey::TraySettings,
         );
-        assert!(snapshot.menu_items.iter().any(|item| item == &about_label));
+        assert!(
+            snapshot
+                .menu_items
+                .iter()
+                .any(|item| item == &settings_label)
+        );
     }
 
     #[test]
@@ -826,9 +850,7 @@ mod tests {
 
         let (_, items) = native_menu_snapshot_for_settings(&providers, &settings, "tray");
 
-        assert!(items.iter().any(|item| item == "すべて更新"));
-        assert!(items.iter().any(|item| item == "ウィンドウを表示"));
-        assert!(!items.iter().any(|item| item == "Refresh All"));
+        assert_eq!(items, vec!["すべて更新", "設定...", "終了"]);
     }
 
     #[test]
@@ -845,15 +867,15 @@ mod tests {
     }
 
     #[test]
-    fn about_path_snapshot_fails_when_about_item_is_missing() {
+    fn about_path_snapshot_fails_when_settings_item_is_missing() {
         let _guard = MENU_LOCK.lock().unwrap();
         set_menu_snapshot(Some("tray".into()), vec!["About".into()]);
 
-        let result = persist_about_path_snapshot_for_item("missing-about", Ok(()));
+        let result = persist_about_path_snapshot_for_item("missing-settings", Ok(()));
 
         assert_eq!(
             result.unwrap_err(),
-            "proof menu context missing tray item: missing-about"
+            "proof menu context missing tray item: missing-settings"
         );
         let snapshot = menu_snapshot();
         assert!(snapshot.menu_path.is_none());

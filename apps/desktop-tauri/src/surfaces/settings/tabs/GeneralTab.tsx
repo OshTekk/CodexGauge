@@ -217,14 +217,11 @@ export default function GeneralTab({
           )}
         </div>
         <div className="settings-section__group">
-          {(["codex", "claude"] as const).flatMap((provider) =>
+          {(["codex"] as const).flatMap((provider) =>
             (["provider", "session", "weekly"] as const).map((window) => {
               const key = window === "provider" ? provider : `${provider}:${window}`;
               const values = settings.providerUsageThresholds ?? {};
-              const providerLabel =
-                provider === "codex"
-                  ? t("ProviderNameCodex")
-                  : t("ProviderNameClaude");
+              const providerLabel = t("ProviderNameCodex");
               return (
                 <ThresholdOverrideInputs
                   key={key}

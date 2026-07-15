@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // App.tsx routes by `getCurrentWebviewWindow().label` before falling through
@@ -21,6 +21,7 @@ const tauriMocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
   downloadUpdate: vi.fn(),
   setSurfaceMode: vi.fn(),
+  openFlyoutWindow: vi.fn(),
   getLocaleStrings: vi.fn(),
   setUiLanguage: vi.fn(),
   getCurrentSurfaceState: vi.fn(),
@@ -48,11 +49,15 @@ vi.mock("./floatbar/FloatBar", () => ({
   default: () => <div data-testid="surface-float-bar" />,
 }));
 
-vi.mock("./hooks/useSurfaceSnapshot", () => ({
-  useSurfaceSnapshot: () => ({
+const surfaceMocks = vi.hoisted(() => ({
+  snapshot: {
     mode: "hidden",
     target: { kind: "summary" },
-  }),
+  },
+}));
+
+vi.mock("./hooks/useSurfaceSnapshot", () => ({
+  useSurfaceSnapshot: () => surfaceMocks.snapshot,
 }));
 
 import App from "./App";
@@ -125,6 +130,10 @@ describe("App window-label routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     webviewWindowMocks.label = "main";
+    surfaceMocks.snapshot = {
+      mode: "hidden",
+      target: { kind: "summary" },
+    };
     tauriMocks.getBootstrapState.mockResolvedValue(bootstrap());
     tauriMocks.getSettingsSnapshot.mockResolvedValue(settings());
     tauriMocks.checkForUpdates.mockResolvedValue({
@@ -142,6 +151,7 @@ describe("App window-label routing", () => {
       mode: "hidden",
       target: { kind: "summary" },
     });
+    tauriMocks.openFlyoutWindow.mockResolvedValue(undefined);
     eventMocks.listen.mockResolvedValue(() => {});
   });
 
@@ -169,15 +179,65 @@ describe("App window-label routing", () => {
     expect(queryByTestId("surface-tray-panel")).toBeNull();
   });
 
-  it("routes the detached floatbar window to FloatBar, not TrayPanel", async () => {
+  it("does not route the detached floatbar window to a visible surface", async () => {
     webviewWindowMocks.label = "floatbar";
 
-    const { queryByTestId } = render(<App />);
+    const { container, queryByTestId } = render(<App />);
 
     await waitFor(() => {
-      expect(queryByTestId("surface-float-bar")).not.toBeNull();
+      expect(tauriMocks.getBootstrapState).toHaveBeenCalled();
+      expect(tauriMocks.getLocaleStrings).toHaveBeenCalled();
     });
+    await waitFor(() => expect(container.firstChild).toBeNull());
+    expect(queryByTestId("surface-float-bar")).toBeNull();
     expect(queryByTestId("surface-tray-panel")).toBeNull();
+  });
+
+  it("does not route a legacy main-window pop-out surface", async () => {
+    surfaceMocks.snapshot = {
+      mode: "popOut",
+      target: { kind: "dashboard" },
+    };
+
+    const { container, queryByTestId } = render(<App />);
+
+    await waitFor(() => expect(container.firstChild).toBeNull());
+    expect(queryByTestId("surface-pop-out-panel")).toBeNull();
+    expect(queryByTestId("surface-tray-panel")).toBeNull();
+  });
+
+  it("does not route TrayPanel through the shared main window", async () => {
+    surfaceMocks.snapshot = {
+      mode: "trayPanel",
+      target: { kind: "summary" },
+    };
+
+    const { container, queryByTestId } = render(<App />);
+
+    await waitFor(() => expect(container.firstChild).toBeNull());
+    expect(queryByTestId("surface-tray-panel")).toBeNull();
+  });
+
+  it("directs global shortcut events to the dedicated flyout", async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(eventMocks.listen).toHaveBeenCalledWith(
+        "global-shortcut-triggered",
+        expect.any(Function),
+      );
+    });
+    const shortcutHandler = eventMocks.listen.mock.calls.find(
+      ([event]) => event === "global-shortcut-triggered",
+    )?.[1] as (() => void) | undefined;
+    expect(shortcutHandler).toBeDefined();
+
+    act(() => shortcutHandler?.());
+
+    await waitFor(() => {
+      expect(tauriMocks.openFlyoutWindow).toHaveBeenCalledTimes(1);
+    });
+    expect(tauriMocks.setSurfaceMode).not.toHaveBeenCalled();
   });
 
   it("does not route the shared main window to TrayPanel while hidden", async () => {

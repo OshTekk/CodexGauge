@@ -362,8 +362,7 @@ impl Default for Settings {
     fn default() -> Self {
         let mut enabled = HashSet::new();
         // Default enabled providers
-        enabled.insert("claude".to_string());
-        enabled.insert("codex".to_string());
+        enabled.insert(ProviderId::Codex.cli_name().to_string());
 
         Self {
             enabled_providers: enabled,
@@ -382,7 +381,7 @@ impl Default for Settings {
             switcher_shows_icons: true,
             menu_bar_shows_highest_usage: false,
             menu_bar_shows_percent: false,
-            show_as_used: true,        // Show as "used" by default
+            show_as_used: false,       // Show as "remaining" by default
             enable_animations: true,   // Animations enabled by default
             reset_time_relative: true, // Show relative times by default
             show_reset_when_exhausted: false,

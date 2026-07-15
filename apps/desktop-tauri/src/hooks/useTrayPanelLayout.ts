@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   getCurrentWindow,
   LogicalSize,
@@ -52,7 +58,13 @@ export function useTrayPanelLayout({
   const [layoutRevision, setLayoutRevision] = useState(0);
   const layoutReadyRef = useRef(false);
   const resizeRunRef = useRef(0);
-  const layoutTimerRef = useRef<number | undefined>(undefined);
+  const layoutTimersRef = useRef<Set<number>>(new Set());
+  const resizeStartTimersRef = useRef<Set<number>>(new Set());
+  const resizeReleaseTimersRef = useRef<Set<number>>(new Set());
+  const animationFramesRef = useRef<Map<number, () => void>>(new Map());
+  const mountedRef = useRef(false);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const resizeUnlistenRef = useRef<(() => void) | null>(null);
   // The window's actual PHYSICAL size after the last resize WE performed. The
   // onResized event also reports physical pixels, so comparing physical-to-
   // physical needs no scale factor — Tauri scaleFactor / webview devicePixelRatio
@@ -66,6 +78,54 @@ export function useTrayPanelLayout({
     null,
   );
   const fixedSizeRef = useRef(fixedSize);
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      // Mark the hook dead before disconnecting any source that may already
+      // have queued a callback. Those callbacks all consult mountedRef too.
+      mountedRef.current = false;
+      resizeRunRef.current += 1;
+
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
+
+      const unlisten = resizeUnlistenRef.current;
+      resizeUnlistenRef.current = null;
+      try {
+        unlisten?.();
+      } catch {
+        /* ignore */
+      }
+
+      for (const timer of layoutTimersRef.current) {
+        window.clearTimeout(timer);
+      }
+      layoutTimersRef.current.clear();
+
+      for (const timer of resizeStartTimersRef.current) {
+        window.clearTimeout(timer);
+      }
+      resizeStartTimersRef.current.clear();
+
+      const pendingReleaseTimers = resizeReleaseTimersRef.current.size;
+      for (const timer of resizeReleaseTimersRef.current) {
+        window.clearTimeout(timer);
+      }
+      resizeReleaseTimersRef.current.clear();
+      programmaticInFlightRef.current = Math.max(
+        0,
+        programmaticInFlightRef.current - pendingReleaseTimers,
+      );
+
+      for (const [frame, resolveAfterUnmount] of animationFramesRef.current) {
+        window.cancelAnimationFrame(frame);
+        resolveAfterUnmount();
+      }
+      animationFramesRef.current.clear();
+    };
+  }, []);
+
   useEffect(() => {
     fixedSizeRef.current = fixedSize;
   }, [fixedSize]);
@@ -99,12 +159,12 @@ export function useTrayPanelLayout({
   // size we applied; anything else is the user dragging the border. Everything
   // is in PHYSICAL pixels — no scale conversion, so it can't drift.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
     let cancelled = false;
     const win = getCurrentWindow();
     void (async () => {
       try {
-        unlisten = await win.onResized(({ payload }) => {
+        const unlisten = await win.onResized(({ payload }) => {
+          if (!mountedRef.current) return;
           if (programmaticInFlightRef.current > 0) return;
           const last = lastSizeRef.current;
           if (
@@ -116,14 +176,24 @@ export function useTrayPanelLayout({
           }
           onUserResizeRef.current?.(payload.width, payload.height);
         });
+        if (cancelled || !mountedRef.current) {
+          unlisten();
+          return;
+        }
+        resizeUnlistenRef.current = unlisten;
       } catch {
-        unlisten = undefined;
+        /* ignore */
       }
-      if (cancelled) unlisten?.();
     })();
     return () => {
       cancelled = true;
-      unlisten?.();
+      const unlisten = resizeUnlistenRef.current;
+      resizeUnlistenRef.current = null;
+      try {
+        unlisten?.();
+      } catch {
+        /* ignore */
+      }
     };
   }, []);
 
@@ -137,10 +207,12 @@ export function useTrayPanelLayout({
     if (!fixed) return;
     let cancelled = false;
     void (async () => {
+      if (!mountedRef.current) return;
       // `fixed` is the user's remembered PHYSICAL size (scale-independent).
       await applySize(new PhysicalSize(fixed[0], fixed[1]));
+      if (cancelled || !mountedRef.current) return;
       await Promise.resolve(reanchorTrayPanel()).catch(() => {});
-      if (cancelled) return;
+      if (cancelled || !mountedRef.current) return;
       layoutReadyRef.current = true;
       setLayoutReady(true);
       await Promise.resolve(revealTrayPanelWindow()).catch(() => {});
@@ -150,37 +222,74 @@ export function useTrayPanelLayout({
     };
   }, [autoFit, isOpen, canMeasure, hasFixedSize, applySize]);
 
-  const requestLayout = useCallback(() => {
-    if (layoutTimerRef.current !== undefined) {
-      window.clearTimeout(layoutTimerRef.current);
+  const scheduleLayout = useCallback(() => {
+    if (!mountedRef.current) return;
+
+    for (const timer of layoutTimersRef.current) {
+      window.clearTimeout(timer);
     }
-    layoutTimerRef.current = window.setTimeout(() => {
+    layoutTimersRef.current.clear();
+
+    if (!mountedRef.current) return;
+    const timer = window.setTimeout(() => {
+      layoutTimersRef.current.delete(timer);
+      if (!mountedRef.current) return;
       setLayoutRevision((current) => current + 1);
     }, layoutReadyRef.current ? 100 : 16);
+    layoutTimersRef.current.add(timer);
   }, []);
 
   useEffect(() => {
-    requestLayout();
-  }, [layoutKey, requestLayout]);
+    scheduleLayout();
+  }, [layoutKey, scheduleLayout]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!mountedRef.current) return;
     const surface = document.querySelector<HTMLElement>(".menu-surface--tray");
     if (!surface || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => requestLayout());
+    const observer = new ResizeObserver(() => {
+      if (!mountedRef.current) return;
+      scheduleLayout();
+    });
+    resizeObserverRef.current = observer;
     observer.observe(surface);
-    return () => observer.disconnect();
-  }, [requestLayout]);
-
-  useEffect(() => {
     return () => {
-      if (layoutTimerRef.current !== undefined) {
-        window.clearTimeout(layoutTimerRef.current);
+      if (resizeObserverRef.current === observer) {
+        resizeObserverRef.current = null;
+        observer.disconnect();
       }
     };
-  }, []);
+  }, [scheduleLayout]);
+
+  const waitForAnimationFrame = useCallback(
+    () =>
+      new Promise<boolean>((resolve) => {
+        if (!mountedRef.current) {
+          resolve(false);
+          return;
+        }
+
+        let frame = 0;
+        let completed = false;
+        const finish = (stillMounted: boolean) => {
+          if (completed) return;
+          completed = true;
+          animationFramesRef.current.delete(frame);
+          resolve(stillMounted);
+        };
+
+        frame = window.requestAnimationFrame(() => {
+          finish(mountedRef.current);
+        });
+        if (!completed) {
+          animationFramesRef.current.set(frame, () => finish(false));
+        }
+      }),
+    [],
+  );
 
   useEffect(() => {
-    if (!autoFit || !canMeasure) return;
+    if (!autoFit || !canMeasure || !mountedRef.current) return;
 
     const minHeight = detailMode
       ? TRAY_DETAIL_MIN_HEIGHT
@@ -189,12 +298,15 @@ export function useTrayPanelLayout({
         : TRAY_OVERVIEW_MIN_HEIGHT;
 
     const resize = async () => {
+      if (!mountedRef.current) return;
       const run = ++resizeRunRef.current;
       const surface = document.querySelector<HTMLElement>(".menu-surface--tray");
       if (!surface) return;
+      const workArea = await getWorkAreaRect().catch(() => null);
+      if (!mountedRef.current || run !== resizeRunRef.current) return;
+
       const html = document.documentElement;
       const pageBody = document.body;
-      const workArea = await getWorkAreaRect().catch(() => null);
       const maxHeight = Math.max(
         minHeight,
         Math.min(
@@ -236,11 +348,11 @@ export function useTrayPanelLayout({
       }
 
       const revealPanel = async () => {
-        if (run !== resizeRunRef.current) return;
+        if (!mountedRef.current || run !== resizeRunRef.current) return;
         layoutReadyRef.current = true;
         setLayoutReady(true);
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        if (run === resizeRunRef.current) {
+        if (!(await waitForAnimationFrame())) return;
+        if (mountedRef.current && run === resizeRunRef.current) {
           await Promise.resolve(revealTrayPanelWindow()).catch(() => {});
         }
       };
@@ -253,12 +365,13 @@ export function useTrayPanelLayout({
         if (!layoutReadyRef.current) {
           autoFitLogicalRef.current = { width: TRAY_WIDTH, height: minHeight };
           await applySize(new LogicalSize(TRAY_WIDTH, minHeight));
+          if (!mountedRef.current || run !== resizeRunRef.current) return;
         }
 
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        if (!(await waitForAnimationFrame())) return;
+        if (!(await waitForAnimationFrame())) return;
 
-        if (run !== resizeRunRef.current) return;
+        if (!mountedRef.current || run !== resizeRunRef.current) return;
 
         const surfaceRect = surface.getBoundingClientRect();
         let contentHeight = Math.max(
@@ -289,13 +402,16 @@ export function useTrayPanelLayout({
         if (shouldResize) {
           autoFitLogicalRef.current = { width: TRAY_WIDTH, height };
           await applySize(new LogicalSize(TRAY_WIDTH, height));
+          if (!mountedRef.current || run !== resizeRunRef.current) return;
           await Promise.resolve(reanchorTrayPanel()).catch(() => {});
         }
 
         await revealPanel();
       } catch (error) {
-        console.warn("CodexBar tray panel resize failed", error);
-        void revealPanel();
+        if (mountedRef.current) {
+          console.warn("CodexBar tray panel resize failed", error);
+          void revealPanel();
+        }
       } finally {
         if (!committedHeight) {
           surface.style.maxHeight = previous.surfaceMaxHeight;
@@ -313,25 +429,47 @@ export function useTrayPanelLayout({
         if (stack) {
           stack.style.overflow = previous.stackOverflow ?? "";
         }
-        window.setTimeout(() => {
+        if (!mountedRef.current) {
+          programmaticInFlightRef.current = Math.max(
+            0,
+            programmaticInFlightRef.current - 1,
+          );
+          return;
+        }
+        const releaseTimer = window.setTimeout(() => {
+          resizeReleaseTimersRef.current.delete(releaseTimer);
+          if (!mountedRef.current) return;
           programmaticInFlightRef.current = Math.max(
             0,
             programmaticInFlightRef.current - 1,
           );
         }, 200);
+        resizeReleaseTimersRef.current.add(releaseTimer);
       }
     };
 
-    const timer = window.setTimeout(
-      () => void resize(),
-      layoutReadyRef.current ? 25 : 0,
-    );
+    if (!mountedRef.current) return;
+    const timer = window.setTimeout(() => {
+      resizeStartTimersRef.current.delete(timer);
+      if (!mountedRef.current) return;
+      void resize();
+    }, layoutReadyRef.current ? 25 : 0);
+    resizeStartTimersRef.current.add(timer);
 
     return () => {
       window.clearTimeout(timer);
+      resizeStartTimersRef.current.delete(timer);
       resizeRunRef.current += 1;
     };
-  }, [autoFit, canMeasure, denseOverview, detailMode, layoutRevision, applySize]);
+  }, [
+    autoFit,
+    canMeasure,
+    denseOverview,
+    detailMode,
+    layoutRevision,
+    applySize,
+    waitForAnimationFrame,
+  ]);
 
-  return { layoutReady, requestLayout };
+  return { layoutReady, requestLayout: scheduleLayout };
 }

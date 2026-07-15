@@ -101,12 +101,25 @@ pub(crate) fn build_provider_detail(provider_id: &str) -> Result<ProviderDetail,
     })
 }
 
+fn visible_provider_detail_arg(provider_id: &str) -> Result<ProviderId, String> {
+    let id = parse_provider_arg(provider_id)?;
+    if crate::product_policy::is_visible_provider(id) {
+        Ok(id)
+    } else {
+        Err(format!(
+            "Provider '{}' is not available in the desktop product",
+            id.cli_name()
+        ))
+    }
+}
+
 #[tauri::command]
 pub fn get_provider_detail(
     app: tauri::AppHandle,
     provider_id: String,
 ) -> Result<ProviderDetail, String> {
-    let mut detail = build_provider_detail(&provider_id)?;
+    let id = visible_provider_detail_arg(&provider_id)?;
+    let mut detail = build_provider_detail(id.cli_name())?;
 
     // Merge the latest cached snapshot, if any.
     let state = app.state::<Mutex<AppState>>();
@@ -151,7 +164,7 @@ pub fn revoke_provider_credentials(provider_id: String) -> Result<(), String> {
     // Best-effort: drop every app-managed credential for this provider so the
     // caller can follow up with a fresh login or import. Missing entries are
     // silently ignored; only I/O errors propagate.
-    let id = parse_provider_arg(&provider_id)?;
+    let id = visible_provider_detail_arg(&provider_id)?;
     let provider_id = id.cli_name();
 
     let mut keys = ApiKeys::load();
@@ -203,5 +216,20 @@ pub fn get_credential_storage_status() -> CredentialStorageStatusBridge {
         token_accounts: credential_file_status_label(secure_file::status(
             &TokenAccountStore::default_path(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod product_policy_tests {
+    use super::*;
+
+    #[test]
+    fn provider_detail_policy_accepts_codex_and_rejects_hidden_providers() {
+        assert_eq!(
+            visible_provider_detail_arg(ProviderId::Codex.cli_name()).unwrap(),
+            ProviderId::Codex
+        );
+        let error = visible_provider_detail_arg(ProviderId::Claude.cli_name()).unwrap_err();
+        assert!(error.contains("not available"));
     }
 }

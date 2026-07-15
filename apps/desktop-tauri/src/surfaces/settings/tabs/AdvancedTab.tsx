@@ -218,17 +218,6 @@ export default function AdvancedTab({ settings, set, saving }: TabProps) {
               onChange={(v) => set({ disableKeychainAccess: v })}
             />
           </Field>
-          <Field
-            label={t("AvoidKeychainPromptsLabel")}
-            description={t("AvoidKeychainPromptsHelper")}
-            leading
-          >
-            <Toggle
-              checked={settings.claudeAvoidKeychainPrompts}
-              disabled={saving || settings.disableKeychainAccess}
-              onChange={(v) => set({ claudeAvoidKeychainPrompts: v })}
-            />
-          </Field>
         </div>
       </section>
     </>

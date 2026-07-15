@@ -33,11 +33,12 @@ function rateWindow(
     reserveEtaSeconds?: number | null;
     windowMinutes?: number | null;
     resetsAt?: string | null;
+    remainingPercent?: number;
   } = {},
 ) {
   return {
     usedPercent,
-    remainingPercent: 100 - usedPercent,
+    remainingPercent: opts.remainingPercent ?? 100 - usedPercent,
     windowMinutes: opts.windowMinutes ?? null,
     resetsAt: opts.resetsAt ?? null,
     resetDescription: opts.resetDescription ?? null,
@@ -173,6 +174,31 @@ describe("MenuCard", () => {
 
     const fill = document.querySelector<HTMLElement>(".menu-metric__bar-fill");
     expect(fill?.style.width).toBe("35%");
+  });
+
+  it("uses the bridge remaining percentage while coloring from used usage", async () => {
+    const snapshot = provider(null, 35);
+    snapshot.primary = rateWindow(35, { remainingPercent: 12 });
+
+    renderCard(snapshot, { showAsUsed: false });
+
+    expect(await screen.findByText("12% left")).toBeInTheDocument();
+    const fill = document.querySelector<HTMLElement>(".menu-metric__bar-fill");
+    expect(fill?.style.width).toBe("12%");
+    expect(fill).toHaveAttribute("data-level", "normal");
+  });
+
+  it("does not treat 100 percent remaining as critical usage", async () => {
+    const snapshot = provider(null, 0);
+    snapshot.primary = rateWindow(0, { remainingPercent: 100 });
+
+    renderCard(snapshot, { showAsUsed: false });
+
+    expect(await screen.findByText("100% left")).toBeInTheDocument();
+    expect(document.querySelector(".menu-metric__bar-fill")).toHaveAttribute(
+      "data-level",
+      "normal",
+    );
   });
 
   it("displays over-quota usage without overflowing the bar", async () => {

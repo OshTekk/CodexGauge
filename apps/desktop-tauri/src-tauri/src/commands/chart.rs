@@ -5,7 +5,7 @@
 //! the Codex / OpenAI dashboard cache and require an `account_email` to scope
 //! reads to the right cached bundle.
 
-use codexbar::core::OpenAIDashboardCacheStore;
+use codexbar::core::{OpenAIDashboardCacheStore, ProviderId};
 use codexbar::cost_scanner::{CostScanner, CostSummary, get_daily_cost_history};
 use codexbar::locale::{self, LocaleKey};
 use serde::{Deserialize, Serialize};
@@ -67,11 +67,23 @@ pub struct ProviderChartData {
     pub local_usage: Option<ProviderLocalUsageSummary>,
 }
 
+fn visible_chart_provider_arg(provider_id: &str) -> Option<String> {
+    let id = ProviderId::from_cli_name(provider_id.trim())?;
+    crate::product_policy::is_visible_provider(id).then(|| id.cli_name().to_string())
+}
+
+fn hidden_provider_chart_data() -> ProviderChartData {
+    ProviderChartData::empty(ProviderId::Codex.cli_name().to_string())
+}
+
 #[tauri::command]
 pub async fn get_provider_chart_data(
     provider_id: String,
     account_email: Option<String>,
 ) -> ProviderChartData {
+    let Some(provider_id) = visible_chart_provider_arg(&provider_id) else {
+        return hidden_provider_chart_data();
+    };
     let fallback_provider_id = provider_id.clone();
     let cancel = register_chart_scan(&provider_id);
     tauri::async_runtime::spawn_blocking(move || {
@@ -88,6 +100,7 @@ pub async fn get_provider_chart_data(
 pub async fn get_provider_local_usage_summary(
     provider_id: String,
 ) -> Option<ProviderLocalUsageSummary> {
+    let provider_id = visible_chart_provider_arg(&provider_id)?;
     let failure_provider_id = provider_id.clone();
     tauri::async_runtime::spawn_blocking(move || load_provider_local_usage_summary(&provider_id))
         .await
@@ -493,11 +506,32 @@ fn load_openai_dashboard_chart_data(
 mod tests {
     use super::{
         CostFetchFailure, ProviderLocalUsageSummary, cost_fetch_failure_allows_early_retry,
-        localized_estimate_note, token_cost_cache_is_fresh,
+        hidden_provider_chart_data, localized_estimate_note, token_cost_cache_is_fresh,
+        visible_chart_provider_arg,
     };
     use crate::commands::is_provider_cache_fresh;
+    use codexbar::core::ProviderId;
     use codexbar::settings::Language;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn chart_commands_neutralize_hidden_providers() {
+        assert_eq!(
+            visible_chart_provider_arg(ProviderId::Codex.cli_name()).as_deref(),
+            Some(ProviderId::Codex.cli_name())
+        );
+        assert_eq!(
+            visible_chart_provider_arg(ProviderId::Claude.cli_name()),
+            None
+        );
+
+        let hidden = hidden_provider_chart_data();
+        assert_eq!(hidden.provider_id, ProviderId::Codex.cli_name());
+        assert!(hidden.cost_history.is_empty());
+        assert!(hidden.credits_history.is_empty());
+        assert!(hidden.usage_breakdown.is_empty());
+        assert!(hidden.local_usage.is_none());
+    }
 
     #[test]
     fn token_cost_age_does_not_use_provider_quota_age() {

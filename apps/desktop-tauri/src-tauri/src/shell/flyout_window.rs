@@ -41,6 +41,36 @@ const BLUR_DISMISS_CLICK_WINDOW: Duration = Duration::from_millis(250);
 /// `was_tray_panel_recently_shown` guard for the old shared window.
 const RECENTLY_SHOWN_GRACE: Duration = Duration::from_millis(500);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlyoutToggleAction {
+    IgnoreConsumedBlur,
+    Hide,
+    Open,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlyoutCloseAction {
+    PreventAndHide,
+}
+
+fn flyout_toggle_action(
+    consumed_blur_dismissal: bool,
+    is_visible: bool,
+    reveal_pending: bool,
+) -> FlyoutToggleAction {
+    if consumed_blur_dismissal {
+        FlyoutToggleAction::IgnoreConsumedBlur
+    } else if is_visible || reveal_pending {
+        FlyoutToggleAction::Hide
+    } else {
+        FlyoutToggleAction::Open
+    }
+}
+
+const fn flyout_close_action() -> FlyoutCloseAction {
+    FlyoutCloseAction::PreventAndHide
+}
+
 /// Read the remembered flyout size, if any (migrating a legacy
 /// `"trayPanel"`-keyed size on first read — see `geometry_store::load_size`).
 pub fn stored_size() -> Option<(u32, u32)> {
@@ -58,6 +88,12 @@ pub fn save_stored_size(width: u32, height: u32) {
 pub fn is_open(app: &AppHandle) -> bool {
     app.get_webview_window(FLYOUT_LABEL)
         .is_some_and(|w| w.is_visible().unwrap_or(false))
+}
+
+fn is_reveal_pending(app: &AppHandle) -> bool {
+    app.try_state::<Mutex<AppState>>()
+        .and_then(|state| state.lock().ok().map(|guard| guard.flyout_reveal_pending))
+        .unwrap_or(false)
 }
 
 /// Build (first open) or show + focus (subsequent opens) the flyout window at
@@ -163,14 +199,20 @@ pub fn toggle_with_blur_consume(app: &AppHandle, position: Option<(i32, i32)>) {
             .take_recent_blur_dismissal(Instant::now(), BLUR_DISMISS_CLICK_WINDOW)
     };
 
-    if consumed_blur_dismissal {
-        return;
-    }
-
-    if is_open(app) {
-        let _ = hide(app);
-    } else {
-        let _ = open_or_focus(app, position);
+    // Read the pending flag first: the reveal transition moves atomically in
+    // one direction from pending/hidden to not-pending/visible. This ordering
+    // prevents a very fast second click from observing both old visibility
+    // and new pending state.
+    let reveal_pending = is_reveal_pending(app);
+    let is_visible = is_open(app);
+    match flyout_toggle_action(consumed_blur_dismissal, is_visible, reveal_pending) {
+        FlyoutToggleAction::IgnoreConsumedBlur => {}
+        FlyoutToggleAction::Hide => {
+            let _ = hide(app);
+        }
+        FlyoutToggleAction::Open => {
+            let _ = open_or_focus(app, position);
+        }
     }
 }
 
@@ -260,8 +302,12 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) -
             // the flyout must survive a native close (Alt+F4-equivalent from
             // a screen reader, etc.) so it can be reopened without rebuilding
             // the WebView2 instance.
-            api.prevent_close();
-            let _ = hide(app);
+            match flyout_close_action() {
+                FlyoutCloseAction::PreventAndHide => {
+                    api.prevent_close();
+                    let _ = hide(app);
+                }
+            }
             true
         }
         _ => true,
@@ -381,5 +427,34 @@ mod tests {
     fn first_hidden_build_does_not_start_show_grace() {
         assert!(show_grace_starts_now(false));
         assert!(!show_grace_starts_now(true));
+    }
+
+    #[test]
+    fn second_left_click_hides_an_open_flyout() {
+        assert_eq!(
+            flyout_toggle_action(false, false, false),
+            FlyoutToggleAction::Open
+        );
+        assert_eq!(
+            flyout_toggle_action(false, true, false),
+            FlyoutToggleAction::Hide
+        );
+        assert_eq!(
+            flyout_toggle_action(true, false, false),
+            FlyoutToggleAction::IgnoreConsumedBlur
+        );
+    }
+
+    #[test]
+    fn second_left_click_cancels_a_pending_first_reveal() {
+        assert_eq!(
+            flyout_toggle_action(false, false, true),
+            FlyoutToggleAction::Hide
+        );
+    }
+
+    #[test]
+    fn native_close_is_prevented_and_hides_without_exiting() {
+        assert_eq!(flyout_close_action(), FlyoutCloseAction::PreventAndHide);
     }
 }

@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::Utc;
+use codexbar::settings::Settings;
 use serde::Serialize;
 use tauri::Manager;
 
@@ -52,14 +53,12 @@ pub fn install(app: tauri::AppHandle) {
 }
 
 pub fn snapshot(app: &tauri::AppHandle) -> PowerToysSnapshot {
-    let providers = app
+    let cached = app
         .state::<Mutex<AppState>>()
         .lock()
         .map(|guard| guard.provider_cache.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(provider_snapshot)
-        .collect();
+        .unwrap_or_default();
+    let providers = visible_provider_snapshots(cached, Settings::load().show_as_used);
 
     PowerToysSnapshot {
         version: 1,
@@ -68,14 +67,33 @@ pub fn snapshot(app: &tauri::AppHandle) -> PowerToysSnapshot {
     }
 }
 
-fn provider_snapshot(provider: ProviderUsageSnapshot) -> PowerToysProviderSnapshot {
+fn visible_provider_snapshots(
+    providers: Vec<ProviderUsageSnapshot>,
+    show_as_used: bool,
+) -> Vec<PowerToysProviderSnapshot> {
+    providers
+        .into_iter()
+        .filter(|provider| {
+            crate::product_policy::is_visible_provider_cli_name(&provider.provider_id)
+        })
+        .map(|provider| provider_snapshot(provider, show_as_used))
+        .collect()
+}
+
+fn provider_snapshot(
+    provider: ProviderUsageSnapshot,
+    show_as_used: bool,
+) -> PowerToysProviderSnapshot {
     let local_usage = cached_local_usage(&provider.provider_id);
     let status_text = if provider.error.is_some() {
         "error".to_string()
     } else {
-        format!("{}%", provider.primary.used_percent.round())
+        format!(
+            "{}%",
+            displayed_percent(&provider.primary, show_as_used).round()
+        )
     };
-    let subtitle = provider_subtitle(&provider, local_usage.as_ref());
+    let subtitle = provider_subtitle(&provider, local_usage.as_ref(), show_as_used);
 
     PowerToysProviderSnapshot {
         id: provider.provider_id,
@@ -105,10 +123,15 @@ fn provider_snapshot(provider: ProviderUsageSnapshot) -> PowerToysProviderSnapsh
 fn provider_subtitle(
     provider: &ProviderUsageSnapshot,
     local_usage: Option<&ProviderLocalUsageSummary>,
+    show_as_used: bool,
 ) -> Option<String> {
     let mut parts = Vec::new();
     if let (Some(label), Some(secondary)) = (&provider.secondary_label, &provider.secondary) {
-        parts.push(format!("{} {}%", label, secondary.used_percent.round()));
+        parts.push(format!(
+            "{} {}%",
+            label,
+            displayed_percent(secondary, show_as_used).round()
+        ));
     }
     if let Some(cost) = local_usage.and_then(|summary| summary.today_cost) {
         parts.push(format!("Today ${cost:.2}"));
@@ -121,6 +144,14 @@ fn provider_subtitle(
             .map(|reset| reset.to_string())
     } else {
         Some(parts.join(" · "))
+    }
+}
+
+fn displayed_percent(window: &RateWindowSnapshot, show_as_used: bool) -> f64 {
+    if show_as_used {
+        window.used_percent
+    } else {
+        window.remaining_percent
     }
 }
 
@@ -182,11 +213,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn provider_snapshot_omits_account_identity_fields() {
-        let snapshot = provider_snapshot(ProviderUsageSnapshot {
-            provider_id: "test-provider".to_string(),
-            display_name: "Test Provider".to_string(),
+    fn usage_snapshot(provider_id: &str, display_name: &str) -> ProviderUsageSnapshot {
+        ProviderUsageSnapshot {
+            provider_id: provider_id.to_string(),
+            display_name: display_name.to_string(),
             primary: rate_window(42.0),
             primary_label: Some("Session".to_string()),
             secondary: None,
@@ -195,17 +225,46 @@ mod tests {
             tertiary: None,
             extra_rate_windows: Vec::new(),
             cost: None,
-            plan_name: Some("Team".to_string()),
-            account_email: Some("dev@example.com".to_string()),
+            plan_name: None,
+            account_email: None,
             source_label: "web".to_string(),
             updated_at: "2026-07-09T00:00:00Z".to_string(),
             error: None,
             pace: None,
-            account_organization: Some("Example Org".to_string()),
+            account_organization: None,
             tray_status_label: None,
             fetch_duration_ms: None,
             wayfinder_usage: None,
-        });
+        }
+    }
+
+    #[test]
+    fn provider_snapshot_omits_account_identity_fields() {
+        let snapshot = provider_snapshot(
+            ProviderUsageSnapshot {
+                provider_id: "test-provider".to_string(),
+                display_name: "Test Provider".to_string(),
+                primary: rate_window(42.0),
+                primary_label: Some("Session".to_string()),
+                secondary: None,
+                secondary_label: None,
+                model_specific: None,
+                tertiary: None,
+                extra_rate_windows: Vec::new(),
+                cost: None,
+                plan_name: Some("Team".to_string()),
+                account_email: Some("dev@example.com".to_string()),
+                source_label: "web".to_string(),
+                updated_at: "2026-07-09T00:00:00Z".to_string(),
+                error: None,
+                pace: None,
+                account_organization: Some("Example Org".to_string()),
+                tray_status_label: None,
+                fetch_duration_ms: None,
+                wayfinder_usage: None,
+            },
+            true,
+        );
         let value = serde_json::to_value(snapshot).unwrap();
 
         assert!(value.get("planName").is_none());
@@ -227,28 +286,31 @@ mod tests {
             }),
         );
 
-        let snapshot = provider_snapshot(ProviderUsageSnapshot {
-            provider_id: "test-provider".to_string(),
-            display_name: "Test Provider".to_string(),
-            primary: rate_window(42.0),
-            primary_label: Some("Session".to_string()),
-            secondary: None,
-            secondary_label: None,
-            model_specific: None,
-            tertiary: None,
-            extra_rate_windows: Vec::new(),
-            cost: None,
-            plan_name: None,
-            account_email: None,
-            source_label: "web".to_string(),
-            updated_at: "2026-07-09T00:00:00Z".to_string(),
-            error: None,
-            pace: None,
-            account_organization: None,
-            tray_status_label: None,
-            fetch_duration_ms: None,
-            wayfinder_usage: None,
-        });
+        let snapshot = provider_snapshot(
+            ProviderUsageSnapshot {
+                provider_id: "test-provider".to_string(),
+                display_name: "Test Provider".to_string(),
+                primary: rate_window(42.0),
+                primary_label: Some("Session".to_string()),
+                secondary: None,
+                secondary_label: None,
+                model_specific: None,
+                tertiary: None,
+                extra_rate_windows: Vec::new(),
+                cost: None,
+                plan_name: None,
+                account_email: None,
+                source_label: "web".to_string(),
+                updated_at: "2026-07-09T00:00:00Z".to_string(),
+                error: None,
+                pace: None,
+                account_organization: None,
+                tray_status_label: None,
+                fetch_duration_ms: None,
+                wayfinder_usage: None,
+            },
+            true,
+        );
         let value = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(value.get("todayCost").and_then(|v| v.as_f64()), Some(1.25));
@@ -268,5 +330,43 @@ mod tests {
             value.get("topModel").and_then(|v| v.as_str()),
             Some("gpt-5")
         );
+    }
+
+    #[test]
+    fn powertoys_snapshot_only_keeps_codex() {
+        let providers = visible_provider_snapshots(
+            vec![
+                usage_snapshot(
+                    codexbar::core::ProviderId::Claude.cli_name(),
+                    codexbar::core::ProviderId::Claude.display_name(),
+                ),
+                usage_snapshot(
+                    codexbar::core::ProviderId::Codex.cli_name(),
+                    codexbar::core::ProviderId::Codex.display_name(),
+                ),
+            ],
+            true,
+        );
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(
+            providers[0].id,
+            codexbar::core::ProviderId::Codex.cli_name()
+        );
+    }
+
+    #[test]
+    fn provider_snapshot_displays_remaining_capacity_in_status_and_subtitle() {
+        let mut provider = usage_snapshot("remaining-test-provider", "Remaining Test Provider");
+        provider.secondary_label = Some("Weekly".to_string());
+        provider.secondary = Some(rate_window(80.0));
+
+        let used_snapshot = provider_snapshot(provider.clone(), true);
+        let snapshot = provider_snapshot(provider, false);
+
+        assert_eq!(used_snapshot.status_text, "42%");
+        assert_eq!(used_snapshot.subtitle.as_deref(), Some("Weekly 80%"));
+        assert_eq!(snapshot.status_text, "58%");
+        assert_eq!(snapshot.subtitle.as_deref(), Some("Weekly 20%"));
     }
 }

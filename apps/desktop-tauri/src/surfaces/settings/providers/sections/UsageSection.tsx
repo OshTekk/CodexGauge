@@ -8,6 +8,7 @@ import { useFormattedResetTime } from "../../../../hooks/useFormattedResetTime";
 interface Props {
   provider: ProviderDetail;
   resetTimeRelative: boolean;
+  showAsUsed: boolean;
   t: (key: LocaleKey) => string;
 }
 
@@ -17,12 +18,21 @@ interface BarSpec {
   rate: RateWindowSnapshot;
 }
 
+type UsageLevel = "normal" | "high" | "critical" | "exhausted";
+
+function usageLevel(usedPercent: number, exhausted: boolean): UsageLevel {
+  if (exhausted) return "exhausted";
+  if (usedPercent >= 95) return "critical";
+  if (usedPercent >= 75) return "high";
+  return "normal";
+}
+
 /**
  * Stacked usage bars — session / weekly / model-specific / tertiary.
  * Mirrors the bars in
  * `rust/src/native_ui/preferences.rs::render_provider_detail_panel`.
  */
-export function UsageSection({ provider, resetTimeRelative, t }: Props) {
+export function UsageSection({ provider, resetTimeRelative, showAsUsed, t }: Props) {
   const bars: BarSpec[] = [];
   if (provider.session) {
     bars.push({
@@ -73,6 +83,7 @@ export function UsageSection({ provider, resetTimeRelative, t }: Props) {
           label={b.label}
           rate={b.rate}
           resetTimeRelative={resetTimeRelative}
+          showAsUsed={showAsUsed}
           t={t}
         />
       ))}
@@ -84,15 +95,22 @@ function UsageBar({
   label,
   rate,
   resetTimeRelative,
+  showAsUsed,
   t,
 }: {
   label: string;
   rate: RateWindowSnapshot;
   resetTimeRelative: boolean;
+  showAsUsed: boolean;
   t: (key: LocaleKey) => string;
 }) {
   const usedPct = Number.isFinite(rate.usedPercent) ? Math.max(0, rate.usedPercent) : 0;
-  const pct = Math.min(100, usedPct);
+  const remainingPct = Number.isFinite(rate.remainingPercent)
+    ? Math.max(0, rate.remainingPercent)
+    : 0;
+  const displayPct = showAsUsed ? usedPct : remainingPct;
+  const pct = Math.min(100, displayPct);
+  const level = usageLevel(usedPct, rate.isExhausted);
   const formattedReset = useFormattedResetTime(
     rate.resetsAt,
     rate.resetDescription,
@@ -110,19 +128,21 @@ function UsageBar({
         <span className="provider-usage-bar__label">{label}</span>
         <span
           className="provider-usage-bar__pct"
+          data-level={level}
           data-exhausted={rate.isExhausted || undefined}
         >
           {rate.isExhausted
-            ? usedPct > 100
+            ? showAsUsed && usedPct > 100
               ? `${usedPct.toFixed(0)}%`
               : t("DetailWindowExhausted")
-            : `${usedPct.toFixed(0)}%`}
+            : `${displayPct.toFixed(0)}%`}
         </span>
       </div>
       <div className="provider-usage-bar__track">
         <div
           className="provider-usage-bar__fill"
           style={{ width: `${pct}%` }}
+          data-level={level}
           data-exhausted={rate.isExhausted || undefined}
         />
       </div>

@@ -120,7 +120,16 @@ impl SettingsUpdate {
 
     fn apply_provider_settings(self, settings: &mut Settings) -> Self {
         if let Some(providers) = self.enabled_providers.clone() {
-            settings.enabled_providers = providers.into_iter().collect::<HashSet<_>>();
+            settings.enabled_providers.retain(|provider_id| {
+                !crate::product_policy::is_visible_provider_cli_name(provider_id)
+            });
+            settings.enabled_providers.extend(
+                providers
+                    .into_iter()
+                    .filter_map(|provider_id| ProviderId::from_cli_name(&provider_id))
+                    .filter(|provider| crate::product_policy::is_visible_provider(*provider))
+                    .map(|provider| provider.cli_name().to_string()),
+            );
         }
         if let Some(v) = self.refresh_interval_secs {
             settings.refresh_interval_secs = v;
@@ -214,8 +223,14 @@ impl SettingsUpdate {
             settings.critical_usage_threshold = v.clamp(0.0, 100.0);
         }
         if let Some(values) = self.provider_usage_thresholds.clone() {
-            settings.provider_usage_thresholds =
-                codexbar::settings::normalize_usage_threshold_overrides(values);
+            settings
+                .provider_usage_thresholds
+                .retain(|key, _| !crate::product_policy::is_visible_provider_scoped_key(key));
+            settings.provider_usage_thresholds.extend(
+                codexbar::settings::normalize_usage_threshold_overrides(values)
+                    .into_iter()
+                    .filter(|(key, _)| crate::product_policy::is_visible_provider_scoped_key(key)),
+            );
         }
         if let Some(v) = self.predictive_pace_warning_enabled {
             settings.predictive_pace_warning_enabled = v;
@@ -256,17 +271,11 @@ impl SettingsUpdate {
         if let Some(v) = self.powertoys_status_pipe_enabled {
             settings.powertoys_status_pipe_enabled = v;
         }
-        if let Some(v) = self.claude_avoid_keychain_prompts {
-            settings.set_claude_avoid_keychain_prompts(v);
-        }
         if let Some(v) = self.codex_spark_usage_visible {
             settings.set_codex_spark_usage_visible(v);
         }
         if let Some(v) = self.disable_keychain_access {
             settings.disable_keychain_access = v;
-            if v {
-                settings.set_claude_avoid_keychain_prompts(true);
-            }
         }
         self
     }
@@ -321,8 +330,14 @@ fn apply_provider_metrics(
     metrics_map: std::collections::HashMap<String, String>,
 ) {
     for (provider, label) in metrics_map {
-        if let Some(pref) = parse_metric_preference(&label) {
-            settings.provider_metrics.insert(provider, pref);
+        if let (Some(provider), Some(pref)) = (
+            ProviderId::from_cli_name(&provider)
+                .filter(|provider| crate::product_policy::is_visible_provider(*provider)),
+            parse_metric_preference(&label),
+        ) {
+            settings
+                .provider_metrics
+                .insert(provider.cli_name().to_string(), pref);
         }
     }
 }
@@ -383,7 +398,9 @@ pub async fn update_settings(
     }
     if tray_promotion_changed {
         let new_promoted = settings.promote_tray_icon;
-        if new_promoted || crate::tray_visibility::should_write_demotion(previous_promoted, new_promoted) {
+        if new_promoted
+            || crate::tray_visibility::should_write_demotion(previous_promoted, new_promoted)
+        {
             crate::tray_visibility::apply_promotion(new_promoted);
         }
     }
@@ -490,5 +507,98 @@ mod tests {
         }
         .apply_display_settings(&mut settings);
         assert_eq!(settings.tray_scale_percent, 100);
+    }
+
+    #[test]
+    fn provider_updates_preserve_hidden_enabled_settings() {
+        let mut settings = Settings::default();
+        settings.enabled_providers.insert("claude".to_string());
+
+        SettingsUpdate {
+            enabled_providers: Some(Vec::new()),
+            ..Default::default()
+        }
+        .apply_provider_settings(&mut settings);
+
+        assert!(!settings.is_provider_enabled(ProviderId::Codex));
+        assert!(settings.is_provider_enabled(ProviderId::Claude));
+
+        SettingsUpdate {
+            enabled_providers: Some(vec![
+                ProviderId::Codex.cli_name().to_string(),
+                ProviderId::Gemini.cli_name().to_string(),
+            ]),
+            ..Default::default()
+        }
+        .apply_provider_settings(&mut settings);
+
+        assert!(settings.is_provider_enabled(ProviderId::Codex));
+        assert!(settings.is_provider_enabled(ProviderId::Claude));
+        assert!(!settings.is_provider_enabled(ProviderId::Gemini));
+    }
+
+    #[test]
+    fn notification_updates_preserve_hidden_provider_thresholds() {
+        let mut settings = Settings::default();
+        settings.provider_usage_thresholds.insert(
+            "claude".to_string(),
+            codexbar::settings::UsageThresholdOverride {
+                high: Some(61.0),
+                critical: Some(81.0),
+            },
+        );
+
+        SettingsUpdate {
+            provider_usage_thresholds: Some(
+                [
+                    (
+                        "codex".to_string(),
+                        codexbar::settings::UsageThresholdOverride {
+                            high: Some(75.0),
+                            critical: Some(95.0),
+                        },
+                    ),
+                    (
+                        "gemini".to_string(),
+                        codexbar::settings::UsageThresholdOverride {
+                            high: Some(10.0),
+                            critical: Some(20.0),
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        }
+        .apply_notification_settings(&mut settings);
+
+        assert_eq!(
+            settings.provider_usage_thresholds["claude"].high,
+            Some(61.0)
+        );
+        assert_eq!(settings.provider_usage_thresholds["codex"].high, Some(75.0));
+        assert!(!settings.provider_usage_thresholds.contains_key("gemini"));
+    }
+
+    #[test]
+    fn advanced_updates_preserve_hidden_provider_configuration() {
+        let mut settings = Settings::default();
+        settings.set_claude_avoid_keychain_prompts(false);
+        settings.set_gateway_url(ProviderId::Wayfinder, "https://wayfinder.example.test");
+
+        SettingsUpdate {
+            claude_avoid_keychain_prompts: Some(true),
+            disable_keychain_access: Some(true),
+            ..Default::default()
+        }
+        .apply_advanced_settings(&mut settings);
+
+        assert!(settings.disable_keychain_access);
+        assert!(!settings.claude_avoid_keychain_prompts());
+        assert_eq!(
+            settings.gateway_url(ProviderId::Wayfinder),
+            "https://wayfinder.example.test"
+        );
     }
 }

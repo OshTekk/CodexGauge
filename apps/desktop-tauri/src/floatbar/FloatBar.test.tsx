@@ -43,11 +43,12 @@ function rateWindow(
     exhausted?: boolean;
     resetsAt?: string | null;
     resetDescription?: string | null;
+    remainingPercent?: number;
   } = {},
 ) {
   return {
     usedPercent: used,
-    remainingPercent: 100 - used,
+    remainingPercent: opts.remainingPercent ?? 100 - used,
     windowMinutes: null,
     resetsAt: opts.resetsAt ?? null,
     resetDescription: opts.resetDescription ?? null,
@@ -66,6 +67,7 @@ function snapshot(
     error?: string | null;
     resetsAt?: string | null;
     resetDescription?: string | null;
+    remainingPercent?: number;
   } = {},
 ): ProviderUsageSnapshot {
   return {
@@ -253,17 +255,23 @@ describe("FloatBar", () => {
     });
   });
 
-  it("applies warning tone when remaining drops below the high threshold", async () => {
-    // highUsageThreshold = 70 → high-remaining cutoff = 30%.
-    // claude at 80% used → 20% remaining → critical (also below crit cutoff 10).
-    // Use 75% used → 25% remaining → warn (between 10 and 30).
-    tauriMocks.getCachedProviders.mockResolvedValue([snapshot("claude", "Claude", 75)]);
-    tauriMocks.getSettingsSnapshot.mockResolvedValue(settings());
+  it("applies warning tone from used percent even when remaining is high", async () => {
+    // The display value is deliberately inconsistent to prove alert tone is
+    // based on consumed usage, not the percentage currently shown.
+    tauriMocks.getCachedProviders.mockResolvedValue([
+      snapshot("claude", "Claude", 75, { remainingPercent: 100 }),
+    ]);
+    tauriMocks.getSettingsSnapshot.mockResolvedValue(
+      settings({ showAsUsed: false }),
+    );
 
-    const { container } = renderFloatBar(bootstrap());
+    const { container } = renderFloatBar(bootstrap({ showAsUsed: false }));
     await waitFor(() => {
       expect(container.querySelector(".floatbar__pill--warn")).not.toBeNull();
     });
+    expect(
+      container.querySelector(".floatbar__pill")?.getAttribute("title"),
+    ).toContain("100% remaining");
   });
 
   it("applies critical tone when the provider is exhausted", async () => {

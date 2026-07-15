@@ -225,17 +225,21 @@ export default function PopOutPanel({
       banner={banner}
       footerRows={footerRows}
     >
-      <ProviderGrid
-        providers={sorted}
-        selectedProviderId={selectedProviderId}
-        showAsUsed={settings.showAsUsed}
-        showProviderIcons={settings.switcherShowsIcons}
-        expanded={gridExpanded}
-        onExpandedChange={setGridExpanded}
-        onSelect={handleGridClick}
-        onReorder={handleReorder}
-      />
-      <div className="provider-grid__divider" />
+      {sorted.length > 1 && (
+        <>
+          <ProviderGrid
+            providers={sorted}
+            selectedProviderId={selectedProviderId}
+            showAsUsed={settings.showAsUsed}
+            showProviderIcons={settings.switcherShowsIcons}
+            expanded={gridExpanded}
+            onExpandedChange={setGridExpanded}
+            onSelect={handleGridClick}
+            onReorder={handleReorder}
+          />
+          <div className="provider-grid__divider" />
+        </>
+      )}
       <div className="menu-stack">
         {visibleProviders.map((p, idx) => (
           <Fragment key={p.providerId}>
@@ -257,7 +261,7 @@ export default function PopOutPanel({
                 resetTimeRelative={settings.resetTimeRelative}
                 showResetWhenExhausted={settings.showResetWhenExhausted}
                 showAsUsed={settings.showAsUsed}
-                compactMetrics={selectedProviderId === null}
+                compactMetrics={selectedProviderId === null && sorted.length > 1}
               />
             </div>
           </Fragment>

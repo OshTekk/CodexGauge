@@ -3,8 +3,13 @@ use super::*;
 #[test]
 fn test_settings_default() {
     let settings = Settings::default();
-    assert!(settings.enabled_providers.contains("claude"));
-    assert!(settings.enabled_providers.contains("codex"));
+    assert_eq!(
+        settings.enabled_providers,
+        [ProviderId::Codex.cli_name().to_string()]
+            .into_iter()
+            .collect()
+    );
+    assert!(!settings.show_as_used);
     assert_eq!(settings.refresh_interval_secs, 300);
     assert!(settings.show_notifications);
     assert_eq!(settings.high_usage_threshold, 70.0);
@@ -264,7 +269,7 @@ fn float_bar_raw_clamps_out_of_range_opacity_on_load() {
 #[test]
 fn test_settings_provider_enabled() {
     let settings = Settings::default();
-    assert!(settings.is_provider_enabled(ProviderId::Claude));
+    assert!(!settings.is_provider_enabled(ProviderId::Claude));
     assert!(settings.is_provider_enabled(ProviderId::Codex));
     assert!(!settings.is_provider_enabled(ProviderId::Gemini));
     assert!(!settings.is_provider_enabled(ProviderId::Wayfinder));
@@ -294,26 +299,25 @@ fn wayfinder_gateway_round_trips_without_changing_settings_paths() {
 fn test_settings_toggle_provider() {
     let mut settings = Settings::default();
 
-    // Claude starts enabled
-    assert!(settings.is_provider_enabled(ProviderId::Claude));
+    // Codex starts enabled
+    assert!(settings.is_provider_enabled(ProviderId::Codex));
 
     // Toggle off
-    let enabled = settings.toggle_provider(ProviderId::Claude);
+    let enabled = settings.toggle_provider(ProviderId::Codex);
     assert!(!enabled);
-    assert!(!settings.is_provider_enabled(ProviderId::Claude));
+    assert!(!settings.is_provider_enabled(ProviderId::Codex));
 
     // Toggle back on
-    let enabled = settings.toggle_provider(ProviderId::Claude);
+    let enabled = settings.toggle_provider(ProviderId::Codex);
     assert!(enabled);
-    assert!(settings.is_provider_enabled(ProviderId::Claude));
+    assert!(settings.is_provider_enabled(ProviderId::Codex));
 }
 
 #[test]
 fn test_settings_get_enabled_provider_ids() {
     let settings = Settings::default();
     let enabled = settings.get_enabled_provider_ids();
-    assert!(enabled.contains(&ProviderId::Claude));
-    assert!(enabled.contains(&ProviderId::Codex));
+    assert_eq!(enabled, vec![ProviderId::Codex]);
 }
 
 #[test]
@@ -360,7 +364,7 @@ fn test_settings_get_all_providers_status() {
 
     let claude_status = status.iter().find(|s| s.id == "claude").unwrap();
     assert_eq!(claude_status.name, "Claude");
-    assert!(claude_status.enabled);
+    assert!(!claude_status.enabled);
 
     let gemini_status = status.iter().find(|s| s.id == "gemini").unwrap();
     assert!(!gemini_status.enabled);

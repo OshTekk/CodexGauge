@@ -211,7 +211,9 @@ fn begin_provider_refresh(
 
 fn provider_cache_can_skip_refresh(guard: &AppState, force: bool) -> bool {
     !force
-        && !guard.provider_cache.is_empty()
+        && guard.provider_cache.iter().any(|snapshot| {
+            crate::product_policy::is_visible_provider_cli_name(&snapshot.provider_id)
+        })
         && is_provider_cache_fresh(guard.provider_cache_updated_at, PROVIDER_CACHE_STALE_AFTER)
 }
 
@@ -226,7 +228,11 @@ struct ProviderRefreshInputs {
 impl ProviderRefreshInputs {
     fn load() -> Self {
         let settings = Settings::load();
-        let enabled_ids = settings.get_enabled_provider_ids();
+        let enabled_ids = settings
+            .get_enabled_provider_ids()
+            .into_iter()
+            .filter(|provider| crate::product_policy::is_visible_provider(*provider))
+            .collect();
         let manual_cookies = ManualCookies::load();
         let api_keys = ApiKeys::load();
         let token_accounts = TokenAccountStore::new().load().unwrap_or_else(|e| {
@@ -392,8 +398,34 @@ fn finish_provider_refresh(state: &tauri::State<'_, Mutex<AppState>>) -> Result<
     Ok(guard
         .provider_cache
         .iter()
+        .filter(|snapshot| {
+            crate::product_policy::is_visible_provider_cli_name(&snapshot.provider_id)
+        })
         .filter(|s| s.error.is_some())
         .count())
+}
+
+pub(crate) fn visible_provider_snapshots(
+    snapshots: &[ProviderUsageSnapshot],
+) -> Vec<ProviderUsageSnapshot> {
+    snapshots
+        .iter()
+        .filter(|snapshot| {
+            crate::product_policy::is_visible_provider_cli_name(&snapshot.provider_id)
+        })
+        .cloned()
+        .collect()
+}
+
+fn frontend_provider_snapshots(
+    snapshots: &[ProviderUsageSnapshot],
+    spark_usage_visible: bool,
+) -> Vec<ProviderUsageSnapshot> {
+    let mut snapshots = visible_provider_snapshots(snapshots);
+    for snapshot in &mut snapshots {
+        super::filter_hidden_codex_spark_rows(snapshot, spark_usage_visible);
+    }
+    snapshots
 }
 
 fn update_tray_and_notifications(
@@ -404,7 +436,7 @@ fn update_tray_and_notifications(
 ) -> Result<(), String> {
     let cached = {
         let guard = state.lock().map_err(|e| e.to_string())?;
-        guard.provider_cache.clone()
+        visible_provider_snapshots(&guard.provider_cache)
     };
     crate::tray_bridge::update_tray_status_items(app, &cached);
     crate::tray_bridge::update_tray_icon_and_tooltip(app, &cached);
@@ -421,26 +453,27 @@ fn notify_usage_thresholds(
     let cli_map = codexbar::core::cli_name_map();
     if let Ok(mut guard) = state.lock() {
         for snapshot in cached {
-            if snapshot.error.is_none()
+            if crate::product_policy::is_visible_provider_cli_name(&snapshot.provider_id)
+                && snapshot.error.is_none()
                 && let Some(&provider) = cli_map.get(snapshot.provider_id.as_str())
             {
                 guard.notification_manager.check_and_notify(
                     provider,
                     "session",
-                    snapshot.primary.used_percent,
+                    notification_used_percent(&snapshot.primary),
                     settings,
                 );
                 if let Some(weekly) = &snapshot.secondary {
                     guard.notification_manager.check_and_notify(
                         provider,
                         "weekly",
-                        weekly.used_percent,
+                        notification_used_percent(weekly),
                         settings,
                     );
                 }
                 guard.notification_manager.check_session_transition(
                     provider,
-                    snapshot.primary.used_percent,
+                    notification_used_percent(&snapshot.primary),
                     settings,
                 );
                 notify_predictive_pace(
@@ -453,6 +486,10 @@ fn notify_usage_thresholds(
             }
         }
     }
+}
+
+fn notification_used_percent(window: &RateWindowSnapshot) -> f64 {
+    window.used_percent
 }
 
 fn notify_predictive_pace(
@@ -559,21 +596,28 @@ pub async fn refresh_providers_if_stale(app: tauri::AppHandle) -> Result<(), Str
 pub fn get_cached_providers(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Vec<ProviderUsageSnapshot> {
-    let mut snapshots = state
+    let snapshots = state
         .lock()
         .map(|guard| guard.provider_cache.clone())
         .unwrap_or_default();
     let spark_usage_visible = Settings::load().codex_spark_usage_visible();
-    for snapshot in &mut snapshots {
-        super::filter_hidden_codex_spark_rows(snapshot, spark_usage_visible);
-    }
-
-    snapshots
+    frontend_provider_snapshots(&snapshots, spark_usage_visible)
 }
 
 #[cfg(test)]
 mod predictive_warning_tests {
     use super::*;
+
+    fn snapshot(provider: ProviderId, used_percent: f64) -> ProviderUsageSnapshot {
+        let metadata = instantiate_provider(provider).metadata().clone();
+        let result = ProviderFetchResult {
+            usage: codexbar::core::UsageSnapshot::new(RateWindow::new(used_percent)),
+            cost: None,
+            wayfinder_usage: None,
+            source_label: "test".to_string(),
+        };
+        ProviderUsageSnapshot::from_fetch_result(provider, &metadata, &result)
+    }
 
     #[test]
     fn predictive_warning_identity_keeps_claude_sources_and_token_accounts_separate() {
@@ -621,5 +665,52 @@ mod predictive_warning_tests {
             predictive_warning_identity(ProviderId::Codex, "cli", Some("  "), None),
             None
         );
+    }
+
+    #[test]
+    fn frontend_snapshots_only_expose_codex() {
+        let snapshots = vec![
+            snapshot(ProviderId::Claude, 40.0),
+            snapshot(ProviderId::Codex, 25.0),
+        ];
+
+        let exposed = frontend_provider_snapshots(&snapshots, true);
+
+        assert_eq!(exposed.len(), 1);
+        assert_eq!(exposed[0].provider_id, ProviderId::Codex.cli_name());
+        assert_eq!(exposed[0].primary.used_percent, 25.0);
+    }
+
+    #[test]
+    fn notification_percentage_is_always_used_percent() {
+        let window = RateWindowSnapshot {
+            used_percent: 95.0,
+            remaining_percent: 5.0,
+            window_minutes: None,
+            resets_at: None,
+            reset_description: None,
+            is_exhausted: false,
+            is_informational: false,
+            reserve_percent: None,
+            reserve_description: None,
+            reserve_will_last_to_reset: false,
+            reserve_eta_seconds: None,
+        };
+
+        assert_eq!(notification_used_percent(&window), 95.0);
+    }
+
+    #[test]
+    fn hidden_cache_does_not_skip_codex_refresh() {
+        let mut state = AppState::new();
+        state
+            .provider_cache
+            .push(snapshot(ProviderId::Claude, 40.0));
+        state.provider_cache_updated_at = Some(std::time::Instant::now());
+
+        assert!(!provider_cache_can_skip_refresh(&state, false));
+
+        state.provider_cache.push(snapshot(ProviderId::Codex, 25.0));
+        assert!(provider_cache_can_skip_refresh(&state, false));
     }
 }

@@ -77,12 +77,23 @@ fn build_provider_token_accounts(
     }
 }
 
+fn visible_token_provider_arg(provider_id: &str) -> Result<ProviderId, String> {
+    let id = super::parse_provider_arg(provider_id)?;
+    if crate::product_policy::is_visible_provider(id) {
+        Ok(id)
+    } else {
+        Err(format!(
+            "Provider '{}' is not available in the desktop product",
+            id.cli_name()
+        ))
+    }
+}
+
 /// List all providers that support token accounts.
 #[tauri::command]
 pub fn get_token_account_providers() -> Vec<TokenAccountSupportBridge> {
-    ProviderId::all()
-        .iter()
-        .filter_map(|&id| {
+    crate::product_policy::visible_provider_ids()
+        .filter_map(|id| {
             TokenAccountSupport::for_provider(id).map(|s| TokenAccountSupportBridge {
                 provider_id: id.cli_name().to_string(),
                 display_name: id.display_name().to_string(),
@@ -97,7 +108,7 @@ pub fn get_token_account_providers() -> Vec<TokenAccountSupportBridge> {
 /// Load token accounts for a single provider.
 #[tauri::command]
 pub fn get_token_accounts(provider_id: String) -> Result<ProviderTokenAccountsBridge, String> {
-    let id = super::parse_provider_arg(&provider_id)?;
+    let id = visible_token_provider_arg(&provider_id)?;
     let support = TokenAccountSupport::for_provider(id)
         .ok_or_else(|| format!("Provider {provider_id} does not support token accounts"))?;
     let store = TokenAccountStore::new();
@@ -118,7 +129,7 @@ pub fn add_token_account(
     label: String,
     token: String,
 ) -> Result<ProviderTokenAccountsBridge, String> {
-    let id = super::parse_provider_arg(&provider_id)?;
+    let id = visible_token_provider_arg(&provider_id)?;
     let support = TokenAccountSupport::for_provider(id)
         .ok_or_else(|| format!("Provider {provider_id} does not support token accounts"))?;
     super::validate_single_line_secret(&token, "Token", super::MAX_COOKIE_HEADER_LEN)?;
@@ -143,7 +154,7 @@ pub fn remove_token_account(
     provider_id: String,
     account_id: String,
 ) -> Result<ProviderTokenAccountsBridge, String> {
-    let id = super::parse_provider_arg(&provider_id)?;
+    let id = visible_token_provider_arg(&provider_id)?;
     let support = TokenAccountSupport::for_provider(id)
         .ok_or_else(|| format!("Provider {provider_id} does not support token accounts"))?;
     let uuid = uuid::Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
@@ -166,7 +177,7 @@ pub fn set_active_token_account(
     provider_id: String,
     account_id: String,
 ) -> Result<ProviderTokenAccountsBridge, String> {
-    let id = super::parse_provider_arg(&provider_id)?;
+    let id = visible_token_provider_arg(&provider_id)?;
     let support = TokenAccountSupport::for_provider(id)
         .ok_or_else(|| format!("Provider {provider_id} does not support token accounts"))?;
     let uuid = uuid::Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
@@ -181,4 +192,19 @@ pub fn set_active_token_account(
         data.accounts,
         active,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_commands_reject_hidden_providers_before_store_access() {
+        assert_eq!(
+            visible_token_provider_arg(ProviderId::Codex.cli_name()).unwrap(),
+            ProviderId::Codex
+        );
+        let error = visible_token_provider_arg(ProviderId::Claude.cli_name()).unwrap_err();
+        assert!(error.contains("not available"));
+    }
 }

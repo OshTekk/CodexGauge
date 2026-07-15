@@ -153,8 +153,19 @@ pub fn get_current_surface_state(
     let guard = state.lock().map_err(|e| e.to_string())?;
     Ok(CurrentSurfaceState {
         mode: guard.surface_machine.current().as_str().to_string(),
-        target: guard.current_target.clone(),
+        target: visible_surface_target(&guard.current_target),
     })
+}
+
+fn visible_surface_target(target: &SurfaceTarget) -> SurfaceTarget {
+    match target {
+        SurfaceTarget::Provider { provider_id }
+            if !crate::product_policy::is_visible_provider_cli_name(provider_id) =>
+        {
+            SurfaceTarget::Dashboard
+        }
+        _ => target.clone(),
+    }
 }
 
 #[tauri::command]
@@ -189,6 +200,18 @@ pub(crate) fn validate_surface_target(
         ));
     }
 
+    if let SurfaceTarget::Provider { provider_id } = &target
+        && !crate::product_policy::is_visible_provider_cli_name(provider_id)
+    {
+        return Err(format!(
+            "provider target '{provider_id}' is not available in the desktop product"
+        ));
+    }
+
+    if !crate::product_policy::allows_main_window_surfaces() {
+        return Err("main-window surfaces are disabled by the tray-only product policy".into());
+    }
+
     Ok(target)
 }
 
@@ -198,5 +221,35 @@ fn target_label(target: &SurfaceTarget) -> String {
         SurfaceTarget::Dashboard => "dashboard".into(),
         SurfaceTarget::Provider { provider_id } => format!("provider:{provider_id}"),
         SurfaceTarget::Settings { tab } => format!("settings:{tab}"),
+    }
+}
+
+#[cfg(test)]
+mod product_policy_tests {
+    use super::*;
+
+    #[test]
+    fn provider_surface_targets_follow_provider_and_tray_only_policies() {
+        let codex = SurfaceTarget::Provider {
+            provider_id: ProviderId::Codex.cli_name().to_string(),
+        };
+        let error = validate_surface_target(SurfaceMode::PopOut, codex).unwrap_err();
+        assert!(error.contains("tray-only"));
+
+        let error = validate_surface_target(
+            SurfaceMode::PopOut,
+            SurfaceTarget::Provider {
+                provider_id: ProviderId::Claude.cli_name().to_string(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("not available"));
+
+        assert_eq!(
+            visible_surface_target(&SurfaceTarget::Provider {
+                provider_id: ProviderId::Claude.cli_name().to_string(),
+            }),
+            SurfaceTarget::Dashboard
+        );
     }
 }

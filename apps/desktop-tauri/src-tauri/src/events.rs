@@ -64,6 +64,9 @@ pub fn emit_surface_mode_changed(
 }
 
 pub fn emit_provider_updated(app: &AppHandle, snapshot: &ProviderUsageSnapshot) {
+    if !crate::product_policy::is_visible_provider_cli_name(&snapshot.provider_id) {
+        return;
+    }
     let mut snapshot = snapshot.clone();
     crate::commands::filter_hidden_codex_spark_rows(
         &mut snapshot,
@@ -73,6 +76,10 @@ pub fn emit_provider_updated(app: &AppHandle, snapshot: &ProviderUsageSnapshot) 
 }
 
 pub fn emit_refresh_started(app: &AppHandle, provider_ids: Vec<String>) {
+    let provider_ids = provider_ids
+        .into_iter()
+        .filter(|provider_id| crate::product_policy::is_visible_provider_cli_name(provider_id))
+        .collect();
     let _ = app.emit(REFRESH_STARTED, RefreshStartedPayload { provider_ids });
 }
 

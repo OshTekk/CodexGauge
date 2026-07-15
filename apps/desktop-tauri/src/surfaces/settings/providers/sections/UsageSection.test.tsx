@@ -73,11 +73,41 @@ describe("UsageSection", () => {
   it("renders extra Copilot budget windows in settings", async () => {
     render(
       <LocaleProvider>
-        <UsageSection provider={provider()} resetTimeRelative={true} t={(key) => key} />
+        <UsageSection
+          provider={provider()}
+          resetTimeRelative={true}
+          showAsUsed={true}
+          t={(key) => key}
+        />
       </LocaleProvider>,
     );
 
     expect(await screen.findByText("Additional Budget")).toBeInTheDocument();
     expect(screen.getByText("42%")).toBeInTheDocument();
+  });
+
+  it("renders remaining percentages and bar widths when configured", async () => {
+    const { container } = render(
+      <LocaleProvider>
+        <UsageSection
+          provider={provider()}
+          resetTimeRelative={true}
+          showAsUsed={false}
+          t={(key) => key}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(await screen.findByText("80%")).toBeInTheDocument();
+    expect(screen.getByText("58%")).toBeInTheDocument();
+    expect(
+      Array.from(container.querySelectorAll<HTMLElement>(".provider-usage-bar__fill"))
+        .map((fill) => fill.style.width),
+    ).toEqual(["80%", "58%"]);
+    expect(
+      Array.from(container.querySelectorAll<HTMLElement>(".provider-usage-bar__fill"))
+        .map((fill) => fill.dataset.level),
+    ).toEqual(["normal", "normal"]);
+    expect(container.querySelector('[data-level="critical"]')).toBeNull();
   });
 });
