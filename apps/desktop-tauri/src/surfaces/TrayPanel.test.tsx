@@ -28,7 +28,13 @@ const tauriMocks = vi.hoisted(() => ({
   revealTrayPanelWindow: vi.fn(),
   flyoutStoredSize: vi.fn(),
   setFlyoutSize: vi.fn(),
-  getProviderChartData: vi.fn(),
+  getProviderChartData: vi.fn(async () => ({
+    providerId: "codex",
+    costHistory: [],
+    creditsHistory: [],
+    usageBreakdown: [],
+    localUsage: null,
+  })),
   getLocaleStrings: vi.fn(),
   setUiLanguage: vi.fn(),
 }));
@@ -53,17 +59,25 @@ const productPolicyMocks = vi.hoisted(() => ({
   },
 }));
 
-const windowMocks = vi.hoisted(() => ({
-  getCurrentWindow: vi.fn(() => ({
+const windowMocks = vi.hoisted(() => {
+  const createCurrentWindow = () => ({
     setSize: vi.fn().mockResolvedValue(undefined),
     scaleFactor: vi.fn().mockResolvedValue(1),
-    onResized: vi.fn().mockResolvedValue(() => {}),
+    onResized: vi.fn(
+      (_handler: (event: {
+        payload: { width: number; height: number };
+      }) => void) => Promise.resolve(() => {}),
+    ),
     innerSize: vi.fn().mockResolvedValue({ width: 328, height: 200 }),
     startResizeDragging: vi.fn().mockResolvedValue(undefined),
-  })),
-  LogicalSize: vi.fn((width: number, height: number) => ({ width, height })),
-  PhysicalSize: vi.fn((width: number, height: number) => ({ width, height })),
-}));
+  });
+  return {
+    createCurrentWindow,
+    getCurrentWindow: vi.fn(createCurrentWindow),
+    LogicalSize: vi.fn((width: number, height: number) => ({ width, height })),
+    PhysicalSize: vi.fn((width: number, height: number) => ({ width, height })),
+  };
+});
 
 vi.mock("../lib/tauri", () => tauriMocks);
 vi.mock("../productPolicy", () => ({
@@ -208,6 +222,9 @@ function footerButtonLabels(container: HTMLElement): string[] {
 describe("TrayPanel tray-only product surface", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    windowMocks.getCurrentWindow.mockImplementation(
+      windowMocks.createCurrentWindow,
+    );
     eventMocks.listeners.clear();
     Object.assign(productPolicyMocks.policy, {
       visibleProviderId: "codex",
@@ -292,6 +309,8 @@ describe("TrayPanel tray-only product surface", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("reveals from its dedicated window without a shared surface mode", async () => {
@@ -300,6 +319,162 @@ describe("TrayPanel tray-only product surface", () => {
     await waitFor(() => {
       expect(container.querySelector(".tray-panel-reveal--ready")).not.toBeNull();
     });
+  });
+
+  it("cancels queued layout updates and ignores late callbacks after unmount", async () => {
+    vi.useFakeTimers();
+
+    const chartData = {
+      providerId: "codex",
+      costHistory: [],
+      creditsHistory: [],
+      usageBreakdown: [],
+      localUsage: null,
+    };
+    let resolveChart!: (value: typeof chartData) => void;
+
+    tauriMocks.flyoutStoredSize.mockReturnValueOnce(
+      new Promise<[number, number] | null>(() => {}),
+    );
+    tauriMocks.getProviderChartData.mockReturnValueOnce(
+      new Promise<typeof chartData>((resolve) => {
+        resolveChart = resolve;
+      }),
+    );
+
+    type ResizeListener = (event: {
+      payload: { width: number; height: number };
+    }) => void;
+    const capturedCallbacks: {
+      observer?: ResizeObserverCallback;
+      observerInstance?: ResizeObserver;
+      resizeListener?: ResizeListener;
+    } = {};
+    const disconnectObserver = vi.fn();
+    class ResizeObserverMock {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = disconnectObserver;
+
+      constructor(callback: ResizeObserverCallback) {
+        capturedCallbacks.observer = callback;
+        capturedCallbacks.observerInstance = this as unknown as ResizeObserver;
+      }
+    }
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+
+    const unlistenResize = vi.fn();
+    const currentWindow = windowMocks.createCurrentWindow();
+    currentWindow.onResized.mockImplementation(async (listener) => {
+      capturedCallbacks.resizeListener = listener;
+      return unlistenResize;
+    });
+    windowMocks.getCurrentWindow.mockReturnValue(currentWindow);
+
+    const fakeSetTimeout = window.setTimeout;
+    const timeoutDelays: Array<number | undefined> = [];
+    window.setTimeout = ((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      timeoutDelays.push(timeout);
+      return fakeSetTimeout(handler, timeout, ...args);
+    }) as typeof window.setTimeout;
+    const fakeRequestAnimationFrame = window.requestAnimationFrame;
+    let animationFrameCalls = 0;
+    window.requestAnimationFrame = (callback) => {
+      animationFrameCalls += 1;
+      return fakeRequestAnimationFrame(callback);
+    };
+    const consoleErrorSpy = vi.spyOn(console, "error");
+    const windowError = vi.fn();
+    window.addEventListener("error", windowError);
+
+    let rendered: ReturnType<typeof renderTrayPanel> | undefined;
+
+    try {
+      rendered = renderTrayPanel([provider("codex", "Codex", 35)]);
+
+      await act(async () => {
+        for (let index = 0; index < 10; index += 1) {
+          await Promise.resolve();
+        }
+      });
+
+      expect(tauriMocks.getProviderChartData).toHaveBeenCalledTimes(1);
+      const notifyObserver = capturedCallbacks.observer;
+      const observedPanel = capturedCallbacks.observerInstance;
+      const notifyWindowResize = capturedCallbacks.resizeListener;
+      if (
+        notifyObserver === undefined ||
+        observedPanel === undefined ||
+        notifyWindowResize === undefined
+      ) {
+        throw new Error("layout callbacks were not registered");
+      }
+
+      const scheduleCallStart = timeoutDelays.length;
+      act(() => {
+        notifyObserver([], observedPanel);
+        notifyObserver([], observedPanel);
+        notifyObserver([], observedPanel);
+      });
+      expect(
+        timeoutDelays
+          .slice(scheduleCallStart)
+          .filter((delay) => delay === 16),
+      ).toHaveLength(3);
+
+      const animationFrameCallCount = animationFrameCalls;
+      await act(async () => {
+        resolveChart(chartData);
+        await Promise.resolve();
+      });
+      expect(animationFrameCalls).toBeGreaterThan(animationFrameCallCount);
+
+      const { container } = rendered;
+      rendered.unmount();
+      rendered = undefined;
+
+      expect(disconnectObserver).toHaveBeenCalledTimes(1);
+      expect(unlistenResize).toHaveBeenCalledTimes(1);
+      // The chart RAF is external to the hook. Every timeout owned by the
+      // mounted panel must already be gone at this point.
+      expect(vi.getTimerCount()).toBe(1);
+
+      const timeoutCallsAfterCleanup = timeoutDelays.length;
+
+      act(() => {
+        // Model callbacks that the native queues had already delivered.
+        notifyObserver([], observedPanel);
+        notifyWindowResize({ payload: { width: 640, height: 480 } });
+      });
+      expect(vi.getTimerCount()).toBe(1);
+
+      await act(async () => {
+        // This includes MenuCard's chart RAF queued by the resolved Promise.
+        await vi.runAllTimersAsync();
+      });
+
+      expect(timeoutDelays).toHaveLength(timeoutCallsAfterCleanup);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(tauriMocks.setFlyoutSize).not.toHaveBeenCalled();
+      expect(container).toBeEmptyDOMElement();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(windowError).not.toHaveBeenCalled();
+    } finally {
+      rendered?.unmount();
+      window.removeEventListener("error", windowError);
+      windowMocks.getCurrentWindow.mockImplementation(
+        windowMocks.createCurrentWindow,
+      );
+      window.setTimeout = fakeSetTimeout;
+      window.requestAnimationFrame = fakeRequestAnimationFrame;
+      vi.unstubAllGlobals();
+      consoleErrorSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("dismisses on unmodified Escape without quitting", async () => {
