@@ -14,21 +14,16 @@ use codexbar::host::session::launch_block_reason;
 use codexbar::settings::{ApiKeys, Language, ManualCookies, Settings};
 
 #[test]
-fn validate_surface_target_accepts_matching_target() {
-    let target = validate_surface_target(
+fn validate_surface_target_rejects_main_window_surfaces_in_tray_only_product() {
+    let error = validate_surface_target(
         SurfaceMode::Settings,
         SurfaceTarget::Settings {
             tab: "apiKeys".into(),
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(
-        target,
-        SurfaceTarget::Settings {
-            tab: "apiKeys".into()
-        }
-    );
+    assert!(error.contains("tray-only"));
 }
 
 #[test]

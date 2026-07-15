@@ -19,6 +19,10 @@ use tauri::{Emitter, Manager};
 ///
 /// Called once from `main.rs::setup`. No-op when the setting is off.
 pub fn install(app: &tauri::AppHandle) {
+    if !crate::product_policy::allows_float_bar() {
+        return;
+    }
+
     let persisted = Settings::load();
     if persisted.float_bar_enabled {
         let _ = window::show(
@@ -38,6 +42,9 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) -
     if window.label() != FLOATBAR_LABEL {
         return false;
     }
+    if !crate::product_policy::allows_float_bar() {
+        return true;
+    }
     match event {
         tauri::WindowEvent::Moved(_)
         | tauri::WindowEvent::Resized(_)
@@ -51,7 +58,15 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) -
 
 /// Toggle the floating bar from the tray menu. Persists the new state
 /// and shows or hides the window accordingly.
+///
+/// Retained for upstream parity even though the tray-only product exposes no
+/// caller for it.
+#[allow(dead_code)]
 pub fn toggle(app: &tauri::AppHandle) {
+    if !crate::product_policy::allows_float_bar() {
+        return;
+    }
+
     let mut settings = Settings::load();
     settings.float_bar_enabled = !settings.float_bar_enabled;
     let _ = settings.save();
@@ -72,6 +87,10 @@ pub fn toggle(app: &tauri::AppHandle) {
 /// close, or re-apply opacity / click-through as appropriate. Used after
 /// a settings patch is saved.
 pub fn apply_state(app: &tauri::AppHandle, settings: &Settings) {
+    if !crate::product_policy::allows_float_bar() {
+        return;
+    }
+
     let open = app.get_webview_window(FLOATBAR_LABEL).is_some();
     if settings.float_bar_enabled && !open {
         let _ = window::show(
@@ -183,6 +202,10 @@ pub fn after_settings_saved(
     settings: &Settings,
     notify_live_config: bool,
 ) {
+    if !crate::product_policy::allows_float_bar() {
+        return;
+    }
+
     if notify_live_config || !patch.is_empty() {
         notify_settings_changed(app);
     }
@@ -192,6 +215,10 @@ pub fn after_settings_saved(
 }
 
 pub fn notify_settings_changed(app: &tauri::AppHandle) {
+    if !crate::product_policy::allows_float_bar() {
+        return;
+    }
+
     let _ = app.emit(FLOAT_BAR_CONFIG_CHANGED_EVENT, ());
 }
 
@@ -202,6 +229,11 @@ mod tests {
     #[test]
     fn settings_patch_is_empty_by_default() {
         assert!(SettingsPatch::default().is_empty());
+    }
+
+    #[test]
+    fn tray_only_float_bar_entry_points_are_disabled_by_product_policy() {
+        assert!(!crate::product_policy::allows_float_bar());
     }
 
     #[test]

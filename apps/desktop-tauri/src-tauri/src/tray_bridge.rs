@@ -16,11 +16,14 @@ use codexbar::tray::{
 
 use crate::shell;
 use crate::state::{AppState, TrayAnchor};
-use crate::surface::SurfaceMode;
-use crate::surface_target::SurfaceTarget;
 #[cfg(test)]
 use crate::tray_menu::build_tray_menu;
 use crate::tray_menu::{TrayMenuEntry, build_tray_menu_with};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayClickAction {
+    ToggleFlyout,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct MonitorScaleInfo {
@@ -149,88 +152,30 @@ fn build_native_tray_menu(
     Menu::with_items(app, &item_refs)
 }
 
-fn resolve_menu_target(id: &str) -> Option<shell::ShellTransitionRequest> {
-    match id {
-        // "Show Window" — the full draggable window (PopOut mode), unchanged.
-        "show_panel" => Some(shell::ShellTransitionRequest {
-            mode: SurfaceMode::PopOut,
-            target: SurfaceTarget::Dashboard,
-            position: None,
-        }),
-        // NOTE: "pop_out" ("Pop Out Dashboard") is NOT handled here — it opens
-        // the dedicated flyout window (MenuAction::OpenFlyout in
-        // resolve_menu_action below), not a `shell::ShellTransitionRequest`
-        // against the `main`-window surface-mode machine. `SurfaceMode::TrayPanel`
-        // remains as a data key (geometry-key / window_properties source /
-        // panel-size reference) but `main` no longer transitions into it.
-        _ if id.starts_with("provider:") => {
-            let target = SurfaceTarget::parse(id)?;
-            let SurfaceTarget::Provider { provider_id } = &target else {
-                return None;
-            };
-            if !crate::product_policy::is_visible_provider_cli_name(provider_id) {
-                return None;
-            }
-            Some(shell::ShellTransitionRequest {
-                mode: SurfaceMode::PopOut,
-                target,
-                position: None,
-            })
-        }
-        _ => None,
-    }
-}
-
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MenuAction {
-    Transition(shell::ShellTransitionRequest),
-    /// Open Settings/About in a detached window.
-    OpenSettings(String),
-    /// Open (or focus) the dedicated flyout ("Pop Out Dashboard") window.
-    OpenFlyout,
+    OpenSettings,
     Refresh,
-    CheckForUpdates,
-    /// Toggle the enabled/disabled state of the provider with the given CLI name.
-    ToggleProvider(String),
-    /// Toggle the floating bar window on/off.
-    ToggleFloatBar,
     Quit,
-}
-
-enum MenuTransitionDispatch {
-    Transition(shell::ShellTransitionRequest),
-    Reopen(shell::ShellTransitionRequest),
 }
 
 fn resolve_menu_action(id: &str) -> Option<MenuAction> {
     match id {
         "refresh" => Some(MenuAction::Refresh),
-        "check_for_updates" => Some(MenuAction::CheckForUpdates),
         "quit" => Some(MenuAction::Quit),
-        "settings" => Some(MenuAction::OpenSettings("general".into())),
-        "about" => Some(MenuAction::OpenSettings("about".into())),
-        "toggle_float_bar" => Some(MenuAction::ToggleFloatBar),
-        "pop_out" => Some(MenuAction::OpenFlyout),
-        _ if id.starts_with("toggle_provider:") => {
-            let provider_id = id["toggle_provider:".len()..].to_string();
-            crate::product_policy::is_visible_provider_cli_name(&provider_id)
-                .then_some(MenuAction::ToggleProvider(provider_id))
-        }
-        _ => resolve_menu_target(id).map(MenuAction::Transition),
+        "settings" => Some(MenuAction::OpenSettings),
+        _ => None,
     }
 }
 
-fn resolve_menu_transition_dispatch(
-    id: &str,
-    request: shell::ShellTransitionRequest,
-) -> MenuTransitionDispatch {
-    if id == "show_panel" {
-        MenuTransitionDispatch::Reopen(shell::ShellTransitionRequest {
-            mode: request.mode,
-            target: request.target,
-            position: None,
-        })
+fn tray_click_action(
+    button: MouseButton,
+    button_state: MouseButtonState,
+) -> Option<TrayClickAction> {
+    if button == MouseButton::Left && button_state == MouseButtonState::Up {
+        Some(TrayClickAction::ToggleFlyout)
     } else {
-        MenuTransitionDispatch::Transition(request)
+        None
     }
 }
 
@@ -280,15 +225,12 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             } = event
             {
                 let app = tray.app_handle();
-                if button == MouseButton::Left && button_state == MouseButtonState::Up {
+                if tray_click_action(button, button_state) == Some(TrayClickAction::ToggleFlyout) {
                     store_anchor(app, &rect, position);
-                    // Left-click toggles the dedicated flyout window (Pop Out
-                    // Dashboard): open it, or cleanly close it when this same
-                    // click already blur-dismissed it (no open→close flicker).
-                    // The full window stays available via "Show Window"
-                    // (SurfaceMode::PopOut on `main`) — the two now coexist as
-                    // separate OS windows instead of mutually-exclusive states
-                    // of one window. Called directly (not spawned): native
+                    // Left-click toggles the dedicated flyout window: open it,
+                    // or cleanly close it when this same click already
+                    // blur-dismissed it (no open→close flicker). Called directly
+                    // (not spawned): native
                     // tray-icon event callbacks run on the same main-thread
                     // event-loop context as `on_menu_event` below, where
                     // `settings_window::open_or_focus` is also called
@@ -329,36 +271,8 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 /// Route a native menu-item click to the corresponding shell action.
 fn handle_menu_event(app: &AppHandle, id: &str) {
     match resolve_menu_action(id) {
-        Some(MenuAction::Transition(request)) => {
-            match resolve_menu_transition_dispatch(id, request) {
-                // Pass None so default_surface_position can use remembered PopOut
-                // geometry first, then fall back to tray/current-monitor placement.
-                MenuTransitionDispatch::Reopen(request) => {
-                    let _ = shell::reopen_to_target(
-                        app,
-                        request.mode,
-                        request.target,
-                        request.position,
-                    );
-                }
-                MenuTransitionDispatch::Transition(request) => {
-                    let _ = shell::transition_to_target(
-                        app,
-                        request.mode,
-                        request.target,
-                        request.position,
-                    );
-                }
-            }
-        }
-        Some(MenuAction::OpenSettings(tab)) => {
-            let _ = shell::settings_window::open_or_focus(app, &tab);
-        }
-        Some(MenuAction::OpenFlyout) => {
-            // Pass None: open_or_focus falls back to the tray-anchored
-            // default position (same placement chain the old TrayPanel
-            // transition used) when no explicit position is given.
-            let _ = shell::flyout_window::open_or_focus(app, None);
+        Some(MenuAction::OpenSettings) => {
+            let _ = crate::shell::settings_window::open_or_focus(app, "general");
         }
         Some(MenuAction::Refresh) => {
             let handle = app.clone();
@@ -366,30 +280,8 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                 let _ = crate::commands::do_refresh_providers(&handle).await;
             });
         }
-        Some(MenuAction::CheckForUpdates) => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let state = handle.state::<Mutex<AppState>>();
-                let _ = crate::commands::check_for_updates(handle.clone(), state).await;
-            });
-        }
-        Some(MenuAction::ToggleProvider(provider_id)) => {
-            let mut settings = Settings::load();
-            if settings.enabled_providers.contains(&provider_id) {
-                settings.enabled_providers.remove(&provider_id);
-            } else {
-                settings.enabled_providers.insert(provider_id);
-            }
-            let _ = settings.save();
-            crate::floatbar::notify_settings_changed(app);
-            rebuild_tray_menu(app);
-        }
-        Some(MenuAction::ToggleFloatBar) => {
-            crate::floatbar::toggle(app);
-            rebuild_tray_menu(app);
-        }
         Some(MenuAction::Quit) => {
-            app.exit(0);
+            crate::commands::quit_app(app.clone());
         }
         None => {}
     }
@@ -892,135 +784,76 @@ mod tests {
     }
 
     #[test]
-    fn tray_menu_includes_about_and_provider_entries() {
+    fn tray_menu_keeps_only_the_three_product_actions() {
         let menu = build_tray_menu(
             &sample_provider_catalog(),
-            &[],
+            &[("codex".into(), "Codex 92%".into())],
             &["codex".to_string(), "claude".to_string()]
                 .into_iter()
                 .collect(),
         );
-        assert!(menu_contains(&menu, "about"));
-        assert!(menu_contains(&menu, "toggle_provider:codex"));
+
+        assert!(menu_contains(&menu, "refresh"));
+        assert!(menu_contains(&menu, "settings"));
         assert!(menu_contains(&menu, "quit"));
-    }
-
-    #[test]
-    fn toggle_float_bar_routes_to_toggle_action() {
-        let action = resolve_menu_action("toggle_float_bar").expect("float bar action");
-        assert!(matches!(action, MenuAction::ToggleFloatBar));
-    }
-
-    #[test]
-    fn settings_menu_routes_to_open_settings_action() {
-        let action = resolve_menu_action("about").expect("about action");
-        match action {
-            MenuAction::OpenSettings(tab) => assert_eq!(tab, "about"),
-            _ => panic!("expected OpenSettings for 'about'"),
-        }
-
-        let action = resolve_menu_action("settings").expect("settings action");
-        match action {
-            MenuAction::OpenSettings(tab) => assert_eq!(tab, "general"),
-            _ => panic!("expected OpenSettings for 'settings'"),
-        }
-    }
-
-    #[test]
-    fn provider_menu_routes_to_provider_popout_target() {
-        let action = resolve_menu_target("provider:codex").expect("provider target");
-        assert_eq!(action.mode, SurfaceMode::PopOut);
-        assert_eq!(
-            action.target,
-            SurfaceTarget::Provider {
-                provider_id: "codex".into()
-            }
-        );
-    }
-
-    #[test]
-    fn pop_out_menu_routes_to_open_flyout_action() {
-        // "Pop Out Dashboard" opens the dedicated flyout window — not a
-        // `shell::ShellTransitionRequest` against the `main`-window surface
-        // machine — which is what lets it coexist with "Show Window"
-        // (SurfaceMode::PopOut, which stays on `main`) instead of the two
-        // being mutually-exclusive states of one window.
-        let action = resolve_menu_action("pop_out").expect("pop_out action");
-        assert!(matches!(action, MenuAction::OpenFlyout));
-
-        // resolve_menu_target no longer resolves "pop_out" at all — it is
-        // intercepted earlier in resolve_menu_action.
-        assert!(resolve_menu_target("pop_out").is_none());
-
-        let show_window = resolve_menu_target("show_panel").expect("show_panel target");
-        assert_eq!(show_window.mode, SurfaceMode::PopOut);
-
-        // SurfaceMode::TrayPanel is retained purely as a data key (geometry
-        // key / window_properties source / panel-size reference) for the
-        // flyout window's builder — the properties themselves are unchanged.
-        let props = SurfaceMode::TrayPanel.window_properties();
-        assert!(props.resizable && props.blur_dismiss && props.skip_taskbar);
-    }
-
-    #[test]
-    fn show_panel_menu_reopens_popout_dashboard_with_default_position_chain() {
-        let request = resolve_menu_target("show_panel").expect("show_panel target");
-        assert_eq!(request.mode, SurfaceMode::PopOut);
-        assert_eq!(request.target, SurfaceTarget::Dashboard);
-
-        let dispatch = resolve_menu_transition_dispatch(
+        for hidden in [
+            "about",
+            "check_for_updates",
+            "pop_out",
             "show_panel",
-            shell::ShellTransitionRequest {
-                mode: SurfaceMode::PopOut,
-                target: SurfaceTarget::Dashboard,
-                position: Some((320, 240)),
-            },
-        );
-
-        match dispatch {
-            MenuTransitionDispatch::Reopen(request) => {
-                assert_eq!(request.mode, SurfaceMode::PopOut);
-                assert_eq!(request.target, SurfaceTarget::Dashboard);
-                assert_eq!(request.position, None);
-            }
-            MenuTransitionDispatch::Transition(_) => {
-                panic!("show_panel should reopen via default PopOut positioning")
-            }
+            "toggle_float_bar",
+            "providers",
+            "toggle_provider:codex",
+        ] {
+            assert!(
+                !menu_contains(&menu, hidden),
+                "unexpected tray item: {hidden}"
+            );
         }
     }
 
     #[test]
-    fn non_show_panel_menu_keeps_explicit_position() {
-        // "pop_out" no longer reaches resolve_menu_transition_dispatch at all
-        // (it's intercepted as MenuAction::OpenFlyout in resolve_menu_action
-        // before falling through to resolve_menu_target); a provider deep
-        // link is the realistic surviving non-"show_panel" caller of this
-        // dispatch function today.
-        let dispatch = resolve_menu_transition_dispatch(
-            "provider:codex",
-            shell::ShellTransitionRequest {
-                mode: SurfaceMode::PopOut,
-                target: SurfaceTarget::Provider {
-                    provider_id: "codex".into(),
-                },
-                position: Some((320, 240)),
-            },
+    fn left_button_release_toggles_the_flyout() {
+        assert_eq!(
+            tray_click_action(MouseButton::Left, MouseButtonState::Up),
+            Some(TrayClickAction::ToggleFlyout)
         );
+        assert_eq!(
+            tray_click_action(MouseButton::Left, MouseButtonState::Down),
+            None
+        );
+        assert_eq!(
+            tray_click_action(MouseButton::Right, MouseButtonState::Up),
+            None
+        );
+    }
 
-        match dispatch {
-            MenuTransitionDispatch::Transition(request) => {
-                assert_eq!(request.mode, SurfaceMode::PopOut);
-                assert_eq!(
-                    request.target,
-                    SurfaceTarget::Provider {
-                        provider_id: "codex".into()
-                    }
-                );
-                assert_eq!(request.position, Some((320, 240)));
-            }
-            MenuTransitionDispatch::Reopen(_) => {
-                panic!("non-show-panel actions should use direct transitions")
-            }
+    #[test]
+    fn native_menu_routes_only_refresh_settings_and_quit() {
+        assert_eq!(resolve_menu_action("refresh"), Some(MenuAction::Refresh));
+        assert_eq!(
+            resolve_menu_action("settings"),
+            Some(MenuAction::OpenSettings)
+        );
+        assert_eq!(resolve_menu_action("quit"), Some(MenuAction::Quit));
+    }
+
+    #[test]
+    fn obsolete_tray_actions_are_unreachable() {
+        for hidden in [
+            "about",
+            "check_for_updates",
+            "pop_out",
+            "show_panel",
+            "toggle_float_bar",
+            "provider:codex",
+            "toggle_provider:codex",
+        ] {
+            assert_eq!(
+                resolve_menu_action(hidden),
+                None,
+                "unexpected action: {hidden}"
+            );
         }
     }
 
@@ -1275,14 +1108,11 @@ mod tests {
     }
 
     #[test]
-    fn native_menu_rejects_hidden_provider_actions() {
-        assert!(resolve_menu_target("provider:claude").is_none());
+    fn native_menu_rejects_all_provider_actions() {
+        assert!(resolve_menu_action("provider:claude").is_none());
         assert!(resolve_menu_action("toggle_provider:claude").is_none());
-        assert!(resolve_menu_target("provider:codex").is_some());
-        assert!(matches!(
-            resolve_menu_action("toggle_provider:codex"),
-            Some(MenuAction::ToggleProvider(provider_id)) if provider_id == "codex"
-        ));
+        assert!(resolve_menu_action("provider:codex").is_none());
+        assert!(resolve_menu_action("toggle_provider:codex").is_none());
     }
 
     #[test]
@@ -1296,6 +1126,39 @@ mod tests {
 
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].provider_id, ProviderId::Codex.cli_name());
+    }
+
+    #[test]
+    fn codex_error_keeps_a_renderable_tray_and_core_actions() {
+        let mut codex = fake_snapshot("codex", "Codex", 0.0);
+        codex.error = Some("network timeout".to_string());
+        let visible = presentation_snapshots(&[codex], true);
+
+        assert_eq!(visible.len(), 1);
+        assert!(visible[0].error.is_some());
+
+        let tooltip = build_tooltip(&visible, false, codexbar::settings::Language::English);
+        assert!(tooltip.contains("Codex"));
+        assert!(tooltip.contains("network timeout"));
+
+        let (rgba, width, height) =
+            render_tray_icon_for_settings(&Settings::default(), 0.0, None, 0.0, None, true);
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+        assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
+
+        let menu = build_tray_menu(
+            &sample_provider_catalog(),
+            &[],
+            &[ProviderId::Codex.cli_name().to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            menu.iter()
+                .filter_map(|entry| entry.id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["refresh", "settings", "quit"]
+        );
     }
 
     #[test]

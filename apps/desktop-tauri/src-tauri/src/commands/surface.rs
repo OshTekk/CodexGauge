@@ -208,6 +208,10 @@ pub(crate) fn validate_surface_target(
         ));
     }
 
+    if !crate::product_policy::allows_main_window_surfaces() {
+        return Err("main-window surfaces are disabled by the tray-only product policy".into());
+    }
+
     Ok(target)
 }
 
@@ -225,14 +229,12 @@ mod product_policy_tests {
     use super::*;
 
     #[test]
-    fn provider_surface_target_accepts_codex_and_rejects_hidden_providers() {
+    fn provider_surface_targets_follow_provider_and_tray_only_policies() {
         let codex = SurfaceTarget::Provider {
             provider_id: ProviderId::Codex.cli_name().to_string(),
         };
-        assert_eq!(
-            validate_surface_target(SurfaceMode::PopOut, codex.clone()).unwrap(),
-            codex
-        );
+        let error = validate_surface_target(SurfaceMode::PopOut, codex).unwrap_err();
+        assert!(error.contains("tray-only"));
 
         let error = validate_surface_target(
             SurfaceMode::PopOut,

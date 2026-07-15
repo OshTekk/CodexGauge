@@ -5,6 +5,7 @@ import type { MenuBarDisplayMode, TrayIconMode, TrayVisibilityStatusDto } from "
 import type { TabProps } from "../../Settings";
 import { FloatBarSettingsSection } from "../../../floatbar";
 import { getTrayVisibilityStatus } from "../../../lib/tauri";
+import { PRODUCT_POLICY } from "../../../productPolicy";
 
 function clampWindowScalePercent(value: number): number {
   return Math.min(250, Math.max(100, Number.isFinite(value) ? value : 100));
@@ -44,42 +45,46 @@ export default function DisplayTab({
       {mode === "menuBar" && <section className="settings-section">
         <h3 className="settings-section__title">{t("MenuBar")}</h3>
         <div className="settings-section__group">
-          <Field
-            label={t("TrayIconModeLabel")}
-            description={t("TrayIconModeHelper")}
-          >
-            <Select
-              value={settings.trayIconMode}
-              disabled={saving}
-              options={[
-                { value: "single", label: t("TrayIconModeSingle") },
-                { value: "perProvider", label: t("TrayIconModePerProvider") },
-              ]}
-              onChange={(v) => set({ trayIconMode: v as TrayIconMode })}
-            />
-          </Field>
-          <Field
-            label={t("ShowProviderIcons")}
-            description={t("ShowProviderIconsHelper")}
-            leading
-          >
-            <Toggle
-              checked={settings.switcherShowsIcons}
-              disabled={saving}
-              onChange={(v) => set({ switcherShowsIcons: v })}
-            />
-          </Field>
-          <Field
-            label={t("PreferHighestUsage")}
-            description={t("PreferHighestUsageHelper")}
-            leading
-          >
-            <Toggle
-              checked={settings.menuBarShowsHighestUsage}
-              disabled={saving}
-              onChange={(v) => set({ menuBarShowsHighestUsage: v })}
-            />
-          </Field>
+          {PRODUCT_POLICY.multiProviderDisplaySettingsEnabled && (
+            <>
+              <Field
+                label={t("TrayIconModeLabel")}
+                description={t("TrayIconModeHelper")}
+              >
+                <Select
+                  value={settings.trayIconMode}
+                  disabled={saving}
+                  options={[
+                    { value: "single", label: t("TrayIconModeSingle") },
+                    { value: "perProvider", label: t("TrayIconModePerProvider") },
+                  ]}
+                  onChange={(v) => set({ trayIconMode: v as TrayIconMode })}
+                />
+              </Field>
+              <Field
+                label={t("ShowProviderIcons")}
+                description={t("ShowProviderIconsHelper")}
+                leading
+              >
+                <Toggle
+                  checked={settings.switcherShowsIcons}
+                  disabled={saving}
+                  onChange={(v) => set({ switcherShowsIcons: v })}
+                />
+              </Field>
+              <Field
+                label={t("PreferHighestUsage")}
+                description={t("PreferHighestUsageHelper")}
+                leading
+              >
+                <Toggle
+                  checked={settings.menuBarShowsHighestUsage}
+                  disabled={saving}
+                  onChange={(v) => set({ menuBarShowsHighestUsage: v })}
+                />
+              </Field>
+            </>
+          )}
           <Field
             label={t("ShowPercentInTray")}
             description={t("ShowPercentInTrayHelper")}
@@ -201,7 +206,7 @@ export default function DisplayTab({
         </div>
       </section>}
 
-      {mode === "menu" && (
+      {mode === "menu" && PRODUCT_POLICY.floatBarSettingsEnabled && (
         <FloatBarSettingsSection settings={settings} saving={saving} set={set} />
       )}
     </>

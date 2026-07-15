@@ -6,7 +6,7 @@ import {
   downloadUpdate,
   getBootstrapState,
   getSettingsSnapshot,
-  setSurfaceMode,
+  openFlyoutWindow,
 } from "./lib/tauri";
 import { useSurfaceSnapshot } from "./hooks/useSurfaceSnapshot";
 import { useTheme } from "./hooks/useTheme";
@@ -14,6 +14,7 @@ import { useLocale } from "./hooks/useLocale";
 import TrayPanel from "./surfaces/TrayPanel";
 import { FLOATBAR_WINDOW_LABEL } from "./floatbar/api";
 import { LocaleProvider } from "./i18n/LocaleProvider";
+import { PRODUCT_POLICY } from "./productPolicy";
 import type { BootstrapState, ThemePreference } from "./types/bridge";
 import type { SurfaceSnapshot } from "./hooks/useSurfaceSnapshot";
 
@@ -99,11 +100,10 @@ function AppInner() {
     }, 2_000);
 
     // Listen for user-registered global shortcut events from the
-    // `register_global_shortcut` command. The persistent shortcut (bound via
-    // shortcut_bridge::plugin) already opens the PopOut dashboard natively;
-    // this listener is the fallback for ad-hoc capture-mode registrations.
+    // `register_global_shortcut` command. This product always directs the
+    // shortcut to the dedicated tray flyout.
     const unlistenPromise = listen<string>("global-shortcut-triggered", () => {
-      void setSurfaceMode("popOut", { kind: "dashboard" }).catch(() => {});
+      void openFlyoutWindow().catch(() => {});
     });
 
     const unlistenSettingsChangePromise = isSettingsWindow()
@@ -172,7 +172,7 @@ function AppInner() {
   }
 
   // Detached floating-bar window — render the FloatBar surface directly.
-  if (isFloatBarWindow()) {
+  if (PRODUCT_POLICY.floatBarSurfaceEnabled && isFloatBarWindow()) {
     return (
       <Suspense fallback={<SurfaceFallback />}>
         <FloatBar state={state} />
@@ -201,8 +201,10 @@ function SurfaceRouter({
     case "hidden":
       return null;
     case "trayPanel":
-      return <TrayPanel state={state} />;
+      // TrayPanel is hosted only by the dedicated `flyout` window.
+      return null;
     case "popOut": {
+      if (!PRODUCT_POLICY.popOutSurfaceEnabled) return null;
       const providerId =
         surface.target.kind === "provider"
           ? surface.target.providerId
@@ -220,7 +222,7 @@ function SurfaceRouter({
         </Suspense>
       );
     default:
-      return <TrayPanel state={state} />;
+      return null;
   }
 }
 

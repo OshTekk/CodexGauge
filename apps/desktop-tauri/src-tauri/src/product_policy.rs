@@ -1,5 +1,22 @@
 use codexbar::core::ProviderId;
 
+/// This desktop product runs as a notification-area application.
+///
+/// The existing main-window surfaces stay compiled for upstream parity, but
+/// product entry points must not reveal them while this policy is active.
+pub const TRAY_ONLY: bool = true;
+
+/// Whether a product entry point may reveal a surface hosted by the main
+/// Tauri window.
+pub const fn allows_main_window_surfaces() -> bool {
+    !TRAY_ONLY
+}
+
+/// Whether the optional floating bar may be restored, opened, or changed.
+pub const fn allows_float_bar() -> bool {
+    !TRAY_ONLY
+}
+
 /// Providers exposed by the CodexGauge desktop product.
 ///
 /// The shared provider registry remains unchanged; desktop surfaces apply this
@@ -42,5 +59,13 @@ mod tests {
         assert!(!is_visible_provider_cli_name("unknown"));
         assert!(is_visible_provider_scoped_key("codex:weekly"));
         assert!(!is_visible_provider_scoped_key("claude:weekly"));
+    }
+
+    #[test]
+    fn tray_only_policy_disables_main_surfaces_and_float_bar() {
+        let policy =
+            std::hint::black_box((TRAY_ONLY, allows_main_window_surfaces(), allows_float_bar()));
+
+        assert_eq!(policy, (true, false, false));
     }
 }

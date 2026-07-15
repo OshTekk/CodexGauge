@@ -9,8 +9,18 @@ use tauri::{AppHandle, Manager};
 
 use super::window as floatbar_window;
 
+const FLOAT_BAR_DISABLED_MESSAGE: &str = "floating bar is disabled by product policy";
+
+fn ensure_float_bar_allowed() -> Result<(), String> {
+    crate::product_policy::allows_float_bar()
+        .then_some(())
+        .ok_or_else(|| FLOAT_BAR_DISABLED_MESSAGE.to_string())
+}
+
 #[tauri::command]
 pub async fn show_float_bar(app: AppHandle) -> Result<(), String> {
+    ensure_float_bar_allowed()?;
+
     let mut settings = Settings::load();
     settings.float_bar_enabled = true;
     settings.save().map_err(|e| e.to_string())?;
@@ -26,6 +36,10 @@ pub async fn show_float_bar(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn hide_float_bar(app: AppHandle) -> Result<(), String> {
+    if !crate::product_policy::allows_float_bar() {
+        return Ok(());
+    }
+
     let mut settings = Settings::load();
     settings.float_bar_enabled = false;
     settings.save().map_err(|e| e.to_string())?;
@@ -34,6 +48,8 @@ pub fn hide_float_bar(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn set_float_bar_opacity(app: AppHandle, opacity: u8) -> Result<(), String> {
+    ensure_float_bar_allowed()?;
+
     let opacity = clamp_float_bar_opacity(opacity);
     let mut settings = Settings::load();
     settings.float_bar_opacity = opacity;
@@ -49,6 +65,8 @@ pub fn set_float_bar_opacity(app: AppHandle, opacity: u8) -> Result<(), String> 
 
 #[tauri::command]
 pub fn set_float_bar_click_through(app: AppHandle, enabled: bool) -> Result<(), String> {
+    ensure_float_bar_allowed()?;
+
     let mut settings = Settings::load();
     settings.float_bar_click_through = enabled;
     settings.save().map_err(|e| e.to_string())?;
@@ -63,6 +81,8 @@ pub fn set_float_bar_click_through(app: AppHandle, enabled: bool) -> Result<(), 
 
 #[tauri::command]
 pub fn resize_float_bar(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    ensure_float_bar_allowed()?;
+
     let settings = Settings::load();
     if let Some(window) = app.get_webview_window(floatbar_window::FLOATBAR_LABEL) {
         // One native operation owns the resize + interaction-state invariant,
@@ -74,6 +94,8 @@ pub fn resize_float_bar(app: AppHandle, width: f64, height: f64) -> Result<(), S
 
 #[tauri::command]
 pub fn set_float_bar_orientation(app: AppHandle, orientation: String) -> Result<(), String> {
+    ensure_float_bar_allowed()?;
+
     let orientation = normalize_float_bar_orientation(&orientation);
     let mut settings = Settings::load();
     settings.float_bar_orientation = orientation;
@@ -86,4 +108,15 @@ pub fn set_float_bar_orientation(app: AppHandle, orientation: String) -> Result<
     use tauri::Emitter;
     let _ = app.emit(super::FLOAT_BAR_CONFIG_CHANGED_EVENT, ());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_only_product_rejects_float_bar_mutations_before_window_access() {
+        let error = ensure_float_bar_allowed().unwrap_err();
+        assert_eq!(error, FLOAT_BAR_DISABLED_MESSAGE);
+    }
 }

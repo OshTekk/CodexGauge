@@ -4,10 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../../../hooks/useLocale", () => ({
   useLocale: () => ({ t: (key: string) => key, language: "english" }),
 }));
-// The FloatBar section pulls in its own bridge dependencies; it is irrelevant
-// to the window-scale control under test.
 vi.mock("../../../floatbar", () => ({
-  FloatBarSettingsSection: () => null,
+  FloatBarSettingsSection: () => <div data-testid="floatbar-settings" />,
 }));
 
 import DisplayTab from "./DisplayTab";
@@ -26,9 +24,17 @@ const baseSettings = {
   showResetWhenExhausted: false,
 } as unknown as SettingsSnapshot;
 
-function renderTab(set: (patch: Record<string, unknown>) => void) {
+function renderTab(
+  set: (patch: Record<string, unknown>) => void,
+  mode: "menuBar" | "menu" = "menu",
+) {
   return render(
-    <DisplayTab settings={baseSettings} set={set as never} saving={false} />,
+    <DisplayTab
+      mode={mode}
+      settings={baseSettings}
+      set={set as never}
+      saving={false}
+    />,
   );
 }
 
@@ -62,5 +68,20 @@ describe("DisplayTab window scale", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "ShowResetWhenExhausted" }));
 
     expect(set).toHaveBeenCalledWith({ showResetWhenExhausted: true });
+  });
+
+  it("does not expose floating-bar settings", () => {
+    renderTab(vi.fn());
+
+    expect(screen.queryByTestId("floatbar-settings")).not.toBeInTheDocument();
+  });
+
+  it("does not expose multi-provider tray controls", () => {
+    renderTab(vi.fn(), "menuBar");
+
+    expect(screen.queryByText("TrayIconModeLabel")).not.toBeInTheDocument();
+    expect(screen.queryByText("ShowProviderIcons")).not.toBeInTheDocument();
+    expect(screen.queryByText("PreferHighestUsage")).not.toBeInTheDocument();
+    expect(screen.getByText("ShowPercentInTray")).toBeInTheDocument();
   });
 });

@@ -1,4 +1,12 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { BootstrapState, ProviderUsageSnapshot } from "../types/bridge";
 import {
@@ -6,6 +14,8 @@ import {
   dismissTrayPanel,
   endFlyoutGesture,
   flyoutStoredSize,
+  openProviderDashboard,
+  openProviderStatusPage,
   openSettingsWindow,
   quitApp as quitApplication,
   reorderProviders,
@@ -26,15 +36,15 @@ import MenuSurface, {
 } from "../components/MenuSurface";
 import UpdateBanner from "../components/UpdateBanner";
 import ProviderGrid, { prioritizeProviders } from "../components/ProviderGrid";
-import { openProviderDashboard, openProviderStatusPage } from "../lib/tauri";
 import { orderProviderSnapshots } from "../lib/providerOrder";
 import {
   hydrateProviderSlots,
   orderedEnabledProviderSlots,
 } from "../lib/trayProviders";
 import AgentSessions from "../components/AgentSessions";
+import { PRODUCT_POLICY, isVisibleProductProvider } from "../productPolicy";
 
-/** Provider IDs that have a dashboard URL in the backend */
+/** Provider IDs that have a dashboard URL in the backend. */
 const HAS_DASHBOARD = new Set([
   "abacus", "alibaba", "alibabatokenplan", "amp", "augment",
   "azureopenai", "bedrock", "claude", "codex", "codebuff",
@@ -43,10 +53,10 @@ const HAS_DASHBOARD = new Set([
   "infini", "jetbrains", "kilo", "kimi", "kimik2", "kiro", "manus",
   "mimo", "minimax", "mistral", "nanogpt", "ollama", "openaiapi",
   "opencode", "opencodego", "openrouter", "perplexity", "qoder", "sakana", "stepfun",
-  "t3chat", "venice", "vertexai", "warp", "windsurf",
-  "zai",
+  "t3chat", "venice", "vertexai", "warp", "windsurf", "zai",
 ]);
-/** Provider IDs that have a status page URL in the backend */
+
+/** Provider IDs that have a status page URL in the backend. */
 const HAS_STATUS_PAGE = new Set([
   "alibabatokenplan", "amp", "augment", "azureopenai", "bedrock",
   "claude", "codex", "copilot", "deepgram", "deepseek", "elevenlabs",
@@ -57,10 +67,8 @@ const HAS_STATUS_PAGE = new Set([
 const TRAY_INITIAL_REFRESH_DELAY_MS = 250;
 const DENSE_OVERVIEW_THRESHOLD = 32;
 
-// ── Tray flyout zoom (footer slider, above Refresh) ───────────────────
-// PopOut window mode has its own independent windowScalePercent (webview
-// setZoom) — this is a separate setting/control for the tray flyout only,
-// applied via CSS `zoom` on the MenuSurface root (see render below).
+// Tray flyout zoom is retained for upstream parity, then hidden by the
+// product-policy gate at the render boundary.
 const TRAY_SCALE_MIN = 100;
 const TRAY_SCALE_MAX = 200;
 const TRAY_SCALE_STEP = 5;
@@ -74,19 +82,21 @@ function clampTrayScalePercent(value: number): number {
 }
 
 function getProviderStatus(
-  p: ProviderUsageSnapshot,
+  provider: ProviderUsageSnapshot,
 ): "ok" | "warning" | "exhausted" | "error" {
-  if (p.error) return "error";
-  if (p.primary.isExhausted) return "exhausted";
-  if (p.primary.usedPercent > 80) return "warning";
+  if (provider.error) return "error";
+  if (provider.primary.isExhausted) return "exhausted";
+  if (provider.primary.usedPercent > 80) return "warning";
   return "ok";
 }
 void getProviderStatus;
 
 /**
- * Tray popover surface — two modes like macOS CodexBar:
- * 1. Overview (default): provider grid + all cards stacked
- * 2. Detail: click a provider in grid → show only that provider's card
+ * Tray popover surface — two modes like upstream:
+ * 1. Overview: provider grid + cards.
+ * 2. Detail: one selected provider card.
+ *
+ * Product policy filters this down to the Codex-only presentation.
  */
 export default function TrayPanel({ state }: { state: BootstrapState }) {
   const { settings } = useSettings(state.settings);
@@ -107,11 +117,8 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
   const { t } = useLocale();
   const surfaceTarget = useSurfaceTarget("trayPanel");
 
-  // Zoom slider: LOCAL draft state drives both the thumb and the live CSS
-  // zoom preview while dragging; persistence trails behind a ~250ms debounce
-  // (fire-and-forget updateSettings). The settings_changed echo — from our
-  // own commit round-trip or another window — only re-syncs the draft when
-  // no debounce is pending, so it can't fight the thumb mid-drag.
+  // Preserve the upstream tray zoom implementation, but keep it unreachable
+  // while the tray-only product policy disables the control.
   const settingsTrayScalePercent = clampTrayScalePercent(
     settings.trayScalePercent,
   );
@@ -158,7 +165,7 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
         step={TRAY_SCALE_STEP}
         value={trayScaleDraft}
         aria-label={t("PanelZoom")}
-        onChange={(e) => handleTrayScaleChange(Number(e.target.value))}
+        onChange={(event) => handleTrayScaleChange(Number(event.target.value))}
         style={{ "--zoom-fill": `${trayScaleFillPercent}%` } as CSSProperties}
       />
       <span className="menu-surface__footer-zoom-value">
@@ -174,9 +181,12 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
         state.providers,
         settings.enabledProviders,
         settings.providerOrder,
-      ),
+      ).filter((provider) => isVisibleProductProvider(provider.providerId)),
     [providers, settings.enabledProviders, settings.providerOrder, state.providers],
   );
+
+  // Keep the upstream overview/detail architecture intact. Product policy
+  // controls whether its multi-provider affordances are exposed.
   const denseProviderSlots = useMemo(
     () =>
       orderedEnabledProviderSlots(
@@ -192,14 +202,15 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
     [sorted],
   );
   const initialProviderId =
-    surfaceTarget?.kind === "provider" ? surfaceTarget.providerId : null;
-
-  // null = overview (all providers), string = single provider detail
+    PRODUCT_POLICY.trayProviderGridEnabled && surfaceTarget?.kind === "provider"
+      ? surfaceTarget.providerId
+      : null;
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     initialProviderId,
   );
   const [gridExpanded, setGridExpanded] = useState(false);
   const expectsDenseOverview =
+    PRODUCT_POLICY.trayProviderGridEnabled &&
     selectedProviderId === null &&
     !gridExpanded &&
     settings.enabledProviders.length + 1 > DENSE_OVERVIEW_THRESHOLD;
@@ -212,24 +223,24 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
     setSelectedProviderId(initialProviderId);
   }, [initialProviderId]);
 
-  // Cards to display based on mode
-  // Overview: all providers in the grid — non-error first, then errors
-  // Detail: only the selected provider's card (macOS shows single provider)
   const visibleProviders = useMemo(() => {
     if (selectedProviderId === null) {
-      // Overview: show providers in the same Settings/catalog order as the grid.
-      if (sorted.length + 1 > DENSE_OVERVIEW_THRESHOLD && !gridExpanded) {
+      // Overview: preserve the upstream dense-grid behavior when enabled.
+      if (
+        PRODUCT_POLICY.trayProviderGridEnabled &&
+        sorted.length + 1 > DENSE_OVERVIEW_THRESHOLD &&
+        !gridExpanded
+      ) {
         return prioritizeProviders(denseTrayProviders, null).slice(0, 4);
       }
       return sorted;
     }
-    // Detail: show ONLY the selected provider (macOS behavior — no appended errors)
-    const match = sorted.find((p) => p.providerId === selectedProviderId);
-    if (!match) {
-      return sorted;
-    }
-    return [match];
-  }, [denseTrayProviders, sorted, selectedProviderId, gridExpanded]);
+    // Detail: show only the selected provider, with a safe overview fallback.
+    const match = sorted.find(
+      (provider) => provider.providerId === selectedProviderId,
+    );
+    return match ? [match] : sorted;
+  }, [denseTrayProviders, gridExpanded, selectedProviderId, sorted]);
 
   const layoutKey = useMemo(
     () =>
@@ -243,7 +254,7 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
         expectsDenseOverview ? "dense" : "normal",
         hasLoadedCache ? "cache-ready" : "cache-pending",
         visibleProviders.map((provider) => provider.providerId).join(","),
-        trayScaleDraft,
+        PRODUCT_POLICY.trayZoomEnabled ? trayScaleDraft : "zoom-disabled",
       ].join("|"),
     [
       selectedProviderId,
@@ -336,30 +347,31 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
   });
 
   const openSettings = useCallback(() => {
-    void openSettingsWindow("general").finally(() => {
-      void getCurrentWindow().close();
-    });
+    void openSettingsWindow("general")
+      .then(() => dismissTrayPanel())
+      .catch(() => {});
   }, []);
   const openPopOut = useCallback(() => {
-    setSurfaceMode("popOut", { kind: "dashboard" });
+    void setSurfaceMode("popOut", { kind: "dashboard" });
   }, []);
   const openAbout = useCallback(() => {
-    void openSettingsWindow("about").finally(() => {
-      void getCurrentWindow().close();
-    });
+    void openSettingsWindow("about")
+      .then(() => dismissTrayPanel())
+      .catch(() => {});
   }, []);
   const quitApp = useCallback(() => {
     void quitApplication();
   }, []);
 
-  const headerActions = [
-    { icon: "⧉", title: t("TooltipPopOut"), onClick: openPopOut },
-  ];
-
+  const headerActions = PRODUCT_POLICY.popOutSurfaceEnabled
+    ? [{ icon: "⧉", title: t("TooltipPopOut"), onClick: openPopOut }]
+    : [];
   const footerRows: MenuFooterRow[] = [
     { icon: "↻", label: t("ActionRefresh"), shortcut: "Ctrl+R", onClick: refresh },
     { icon: "⚙", label: t("MenuSettings"), shortcut: "Ctrl+,", onClick: openSettings },
-    { icon: "ⓘ", label: t("MenuAbout"), onClick: openAbout },
+    ...(PRODUCT_POLICY.trayAboutActionEnabled
+      ? [{ icon: "ⓘ", label: t("MenuAbout"), onClick: openAbout }]
+      : []),
     { icon: "⌧", label: t("MenuQuit"), shortcut: "Ctrl+Q", onClick: quitApp },
   ];
 
@@ -397,12 +409,9 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
     return () => window.removeEventListener("keydown", handler);
   }, [refresh, openSettings, quitApp]);
 
-  const handleGridClick = useCallback(
-    (providerId: string | null) => {
-      setSelectedProviderId(providerId);
-    },
-    [],
-  );
+  const handleGridClick = useCallback((providerId: string | null) => {
+    setSelectedProviderId(providerId);
+  }, []);
   const handleReorder = useCallback((orderedIds: string[]) => {
     void reorderProviders(orderedIds).catch(() => {});
   }, []);
@@ -412,6 +421,7 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
   const handleGestureEnd = useCallback(() => {
     void endFlyoutGesture().catch(() => {});
   }, []);
+
   const banner = (
     <UpdateBanner
       updateState={updateState}
@@ -423,23 +433,28 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
     />
   );
   const revealClassName = `tray-panel-reveal${layoutReady ? " tray-panel-reveal--ready" : ""}${expectsDenseOverview ? " tray-panel-reveal--dense" : ""}${fixedFlyoutSize ? " tray-panel-reveal--usersized" : ""}`;
-  const renderProviderCard = (p: ProviderUsageSnapshot) => {
+  const renderProviderCard = (provider: ProviderUsageSnapshot) => {
     const isSelected =
-      selectedProviderId !== null && p.providerId === selectedProviderId;
+      selectedProviderId !== null &&
+      provider.providerId === selectedProviderId;
     return (
       <div
         className={`menu-stack__item${isSelected ? " menu-stack__item--selected" : ""}`}
-        id={`card-${p.providerId}`}
-        key={p.providerId}
+        id={`card-${provider.providerId}`}
+        key={provider.providerId}
       >
         <MenuCard
-          provider={p}
-          isRefreshing={refreshingProviderIds.has(p.providerId)}
+          provider={provider}
+          isRefreshing={refreshingProviderIds.has(provider.providerId)}
           hideEmail={settings.hidePersonalInfo}
           resetTimeRelative={settings.resetTimeRelative}
           showResetWhenExhausted={settings.showResetWhenExhausted}
           showAsUsed={settings.showAsUsed}
-          compactMetrics={selectedProviderId === null && sorted.length > 1}
+          compactMetrics={
+            PRODUCT_POLICY.trayProviderGridEnabled &&
+            selectedProviderId === null &&
+            sorted.length > 1
+          }
           onLayoutChange={requestLayout}
         />
       </div>
@@ -455,9 +470,9 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
           isRefreshing={isRefreshing}
           actions={headerActions}
           banner={banner}
-          footerLead={zoomRow}
+          footerLead={PRODUCT_POLICY.trayZoomEnabled ? zoomRow : undefined}
           footerRows={footerRows}
-          style={{ zoom: trayScale }}
+          style={PRODUCT_POLICY.trayZoomEnabled ? { zoom: trayScale } : undefined}
         >
           {settings.agentSessionsEnabled && <AgentSessions />}
           <MenuEmpty
@@ -478,12 +493,12 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
         isRefreshing={isRefreshing}
         actions={headerActions}
         banner={banner}
-        footerLead={zoomRow}
+        footerLead={PRODUCT_POLICY.trayZoomEnabled ? zoomRow : undefined}
         footerRows={footerRows}
-        style={{ zoom: trayScale }}
+        style={PRODUCT_POLICY.trayZoomEnabled ? { zoom: trayScale } : undefined}
       >
         {settings.agentSessionsEnabled && <AgentSessions />}
-        {sorted.length > 1 && (
+        {PRODUCT_POLICY.trayProviderGridEnabled && sorted.length > 1 && (
           <>
             <ProviderGrid
               providers={expectsDenseOverview ? denseTrayProviders : sorted}
@@ -507,49 +522,70 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
                   {column.map(renderProviderCard)}
                 </div>
               ))
-            : visibleProviders.map((p, idx) => (
-                <Fragment key={p.providerId}>
-                  {idx > 0 && <div className="menu-stack__sep" />}
-                  {renderProviderCard(p)}
+            : visibleProviders.map((provider, index) => (
+                <Fragment key={provider.providerId}>
+                  {index > 0 && <div className="menu-stack__sep" />}
+                  {renderProviderCard(provider)}
                 </Fragment>
               ))}
         </div>
-        {/* Context actions — detail mode only, matches macOS actionsSection */}
-        {selectedProviderId && (HAS_DASHBOARD.has(selectedProviderId) || HAS_STATUS_PAGE.has(selectedProviderId)) && (
-          <div className="context-actions">
-            <div className="context-actions__divider" />
-            {HAS_DASHBOARD.has(selectedProviderId) && (
-              <button
-                type="button"
-                className="context-actions__btn"
-                onClick={() => void openProviderDashboard(selectedProviderId)}
-              >
-                <span className="context-actions__icon" aria-hidden>
-                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect x="2" y="9" width="2.5" height="5" rx="0.6" fill="currentColor" />
-                    <rect x="6.75" y="6" width="2.5" height="8" rx="0.6" fill="currentColor" />
-                    <rect x="11.5" y="3" width="2.5" height="11" rx="0.6" fill="currentColor" />
-                  </svg>
-                </span>
-                {t("ActionUsageDashboard")}
-              </button>
-            )}
-            {HAS_STATUS_PAGE.has(selectedProviderId) && (
-              <button
-                type="button"
-                className="context-actions__btn"
-                onClick={() => void openProviderStatusPage(selectedProviderId)}
-              >
-                <span className="context-actions__icon" aria-hidden>
-                  <svg width="14" height="13" viewBox="0 0 18 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M1 7H4L5.5 3L8 11L10.5 5L12 7H17" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-                  </svg>
-                </span>
-                {t("ActionStatusPage")}
-              </button>
-            )}
-          </div>
-        )}
+        {PRODUCT_POLICY.trayProviderActionsEnabled &&
+          selectedProviderId &&
+          (HAS_DASHBOARD.has(selectedProviderId) ||
+            HAS_STATUS_PAGE.has(selectedProviderId)) && (
+            <div className="context-actions">
+              <div className="context-actions__divider" />
+              {HAS_DASHBOARD.has(selectedProviderId) && (
+                <button
+                  type="button"
+                  className="context-actions__btn"
+                  onClick={() => void openProviderDashboard(selectedProviderId)}
+                >
+                  <span className="context-actions__icon" aria-hidden>
+                    <svg
+                      width="13"
+                      height="13"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
+                    >
+                      <rect x="2" y="9" width="2.5" height="5" rx="0.6" fill="currentColor" />
+                      <rect x="6.75" y="6" width="2.5" height="8" rx="0.6" fill="currentColor" />
+                      <rect x="11.5" y="3" width="2.5" height="11" rx="0.6" fill="currentColor" />
+                    </svg>
+                  </span>
+                  {t("ActionUsageDashboard")}
+                </button>
+              )}
+              {HAS_STATUS_PAGE.has(selectedProviderId) && (
+                <button
+                  type="button"
+                  className="context-actions__btn"
+                  onClick={() => void openProviderStatusPage(selectedProviderId)}
+                >
+                  <span className="context-actions__icon" aria-hidden>
+                    <svg
+                      width="14"
+                      height="13"
+                      viewBox="0 0 18 14"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
+                    >
+                      <path
+                        d="M1 7H4L5.5 3L8 11L10.5 5L12 7H17"
+                        stroke="currentColor"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        fill="none"
+                      />
+                    </svg>
+                  </span>
+                  {t("ActionStatusPage")}
+                </button>
+              )}
+            </div>
+          )}
       </MenuSurface>
       <TrayResizeHandles />
     </div>

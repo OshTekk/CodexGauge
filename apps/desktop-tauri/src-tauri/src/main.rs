@@ -24,16 +24,19 @@ use std::sync::Mutex;
 
 use state::AppState;
 use surface::SurfaceMode;
-use surface_target::SurfaceTarget;
 use tauri::Manager;
 
 const PROOF_ACTIVATION_DELAY: Duration = Duration::from_millis(0);
-const VISIBLE_START_ACTIVATION_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LaunchBehavior {
-    open_primary_window_at_start: bool,
-    suppress_blur_dismiss: bool,
+enum StartupWindowAction {
+    StayHidden,
+    ActivateProofSurface,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecondInstanceAction {
+    ToggleFlyout,
 }
 
 fn should_hide_close_request(mode: SurfaceMode) -> bool {
@@ -43,69 +46,32 @@ fn should_hide_close_request(mode: SurfaceMode) -> bool {
     )
 }
 
-fn primary_window_request() -> shell::ShellTransitionRequest {
-    shell::ShellTransitionRequest {
-        mode: SurfaceMode::PopOut,
-        target: SurfaceTarget::Dashboard,
-        position: None,
+fn second_instance_action<I, S>(_args: I) -> SecondInstanceAction
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    SecondInstanceAction::ToggleFlyout
+}
+
+fn startup_window_action<I, S>(
+    proof_mode: bool,
+    _start_minimized: bool,
+    _args: I,
+) -> StartupWindowAction
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    if proof_mode {
+        StartupWindowAction::ActivateProofSurface
+    } else {
+        StartupWindowAction::StayHidden
     }
 }
 
-fn should_open_primary_window_from_args<I, S>(args: I) -> bool
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    args.into_iter().any(|arg| {
-        let normalized = arg
-            .as_ref()
-            .trim()
-            .trim_start_matches(['-', '/'])
-            .replace(['-', '_'], "")
-            .to_ascii_lowercase();
-        matches!(normalized.as_str(), "menubar" | "traypanel" | "tray")
-    })
-}
-
-fn nonblank_launch_args<I, S>(args: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    args.into_iter()
-        .map(|arg| arg.as_ref().trim().to_string())
-        .filter(|arg| !arg.is_empty())
-        .collect()
-}
-
-fn should_reopen_primary_window_from_instance_args<I, S>(args: I) -> bool
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let args = nonblank_launch_args(args);
-    args.is_empty() || should_open_primary_window_from_args(&args)
-}
-
-fn launch_behavior<I, S>(force_visible: bool, start_minimized: bool, args: I) -> LaunchBehavior
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let args = nonblank_launch_args(args);
-    let explicit_primary_launch = should_open_primary_window_from_args(&args);
-    let plain_desktop_launch = args.is_empty();
-
-    LaunchBehavior {
-        open_primary_window_at_start: force_visible
-            || explicit_primary_launch
-            || (plain_desktop_launch && !start_minimized),
-        suppress_blur_dismiss: force_visible,
-    }
-}
-
-fn should_suppress_blur_dismiss(launch: LaunchBehavior, proof_mode: bool) -> bool {
-    launch.suppress_blur_dismiss || proof_mode
+fn should_suppress_blur_dismiss(proof_mode: bool) -> bool {
+    proof_mode
 }
 
 fn main() {
@@ -113,10 +79,9 @@ fn main() {
 
     let proof_config = proof_harness::ProofConfig::from_env();
     let is_proof_mode = proof_config.is_some();
-    let force_start_visible = std::env::var_os("CODEXBAR_START_VISIBLE").is_some();
     let settings = codexbar::settings::Settings::load();
-    let launch = launch_behavior(
-        force_start_visible,
+    let startup_window_action = startup_window_action(
+        is_proof_mode,
         settings.start_minimized,
         std::env::args().skip(1),
     );
@@ -128,10 +93,8 @@ fn main() {
         .manage(Mutex::new(initial_state))
         .plugin(shortcut_bridge::plugin())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if should_reopen_primary_window_from_instance_args(args.iter().skip(1)) {
-                let request = primary_window_request();
-                let _ =
-                    shell::reopen_to_target(app, request.mode, request.target, request.position);
+            if second_instance_action(args.iter().skip(1)) == SecondInstanceAction::ToggleFlyout {
+                shell::flyout_window::toggle_with_blur_consume(app, None);
             }
         }))
         .invoke_handler(tauri::generate_handler![
@@ -241,23 +204,11 @@ fn main() {
             // Give the WebView/event loop one turn to finish startup before
             // routing shortcut launches into the tray panel. Without this, the
             // Windows shell can leave only Tauri's tiny internal window visible.
-            if is_proof_mode {
+            if startup_window_action == StartupWindowAction::ActivateProofSurface {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(PROOF_ACTIVATION_DELAY).await;
                     proof_harness::activate(&app_handle);
-                });
-            } else if launch.open_primary_window_at_start {
-                let app = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(VISIBLE_START_ACTIVATION_DELAY).await;
-                    let request = primary_window_request();
-                    let _ = shell::reopen_to_target(
-                        &app,
-                        request.mode,
-                        request.target,
-                        request.position,
-                    );
                 });
             }
 
@@ -270,8 +221,11 @@ fn main() {
             if shell::flyout_window::handle_window_event(window, event) {
                 return;
             }
-            // Only the main window participates in blur-dismiss and close-to-hide.
-            // The detached settings window uses normal OS close behavior.
+            if shell::settings_window::handle_window_event(window, event) {
+                return;
+            }
+            // Auxiliary windows handle their own hide-on-close lifecycle above.
+            // Only the main window participates in the legacy surface machine.
             if window.label() != "main" {
                 return;
             }
@@ -279,10 +233,9 @@ fn main() {
                 tauri::WindowEvent::Focused(false) => {
                     // Suppress blur-dismiss in proof mode so the window stays
                     // visible for automated screenshot capture.
-                    if should_suppress_blur_dismiss(
-                        launch,
-                        proof_harness::is_proof_mode(window.app_handle()),
-                    ) {
+                    if should_suppress_blur_dismiss(proof_harness::is_proof_mode(
+                        window.app_handle(),
+                    )) {
                         return;
                     }
                     if let Some(st) = window.app_handle().try_state::<Mutex<AppState>>()
@@ -382,112 +335,83 @@ mod tests {
     }
 
     #[test]
-    fn primary_window_request_targets_popout_dashboard() {
-        let request = primary_window_request();
-        assert_eq!(request.mode, SurfaceMode::PopOut);
-        assert_eq!(request.target, SurfaceTarget::Dashboard);
-        assert_eq!(request.position, None);
+    fn normal_startup_always_stays_hidden() {
+        for start_minimized in [false, true] {
+            assert_eq!(
+                startup_window_action(false, start_minimized, std::iter::empty::<&str>(),),
+                StartupWindowAction::StayHidden
+            );
+            assert_eq!(
+                startup_window_action(false, start_minimized, ["menubar"]),
+                StartupWindowAction::StayHidden
+            );
+            assert_eq!(
+                startup_window_action(false, start_minimized, ["--tray-panel"]),
+                StartupWindowAction::StayHidden
+            );
+        }
     }
 
     #[test]
-    fn menubar_launch_arg_opens_primary_window() {
-        assert!(should_open_primary_window_from_args(["menubar"]));
-        assert!(should_open_primary_window_from_args(["--tray-panel"]));
-        assert!(should_open_primary_window_from_args(["/tray_panel"]));
-    }
-
-    #[test]
-    fn unrelated_launch_args_do_not_open_primary_window() {
-        assert!(!should_open_primary_window_from_args([
-            "usage", "-p", "claude"
-        ]));
-        assert!(!should_reopen_primary_window_from_instance_args([
-            "usage", "-p", "claude"
-        ]));
+    fn proof_mode_is_the_only_startup_activation() {
         assert_eq!(
-            launch_behavior(false, false, ["usage", "-p", "claude"]),
-            LaunchBehavior {
-                open_primary_window_at_start: false,
-                suppress_blur_dismiss: false,
-            }
+            startup_window_action(true, false, std::iter::empty::<&str>()),
+            StartupWindowAction::ActivateProofSurface
         );
-    }
-
-    #[test]
-    fn plain_desktop_launch_opens_unless_start_minimized() {
-        assert_eq!(
-            launch_behavior(false, false, std::iter::empty::<&str>()),
-            LaunchBehavior {
-                open_primary_window_at_start: true,
-                suppress_blur_dismiss: false,
-            }
-        );
-        assert_eq!(
-            launch_behavior(false, false, [""]),
-            LaunchBehavior {
-                open_primary_window_at_start: true,
-                suppress_blur_dismiss: false,
-            }
-        );
-        assert_eq!(
-            launch_behavior(false, false, ["  "]),
-            LaunchBehavior {
-                open_primary_window_at_start: true,
-                suppress_blur_dismiss: false,
-            }
-        );
-        assert_eq!(
-            launch_behavior(false, true, std::iter::empty::<&str>()),
-            LaunchBehavior {
-                open_primary_window_at_start: false,
-                suppress_blur_dismiss: false,
-            }
-        );
-    }
-
-    #[test]
-    fn single_instance_plain_launch_reopens_primary_window() {
-        assert!(should_reopen_primary_window_from_instance_args(
-            std::iter::empty::<&str>()
-        ));
-        assert!(should_reopen_primary_window_from_instance_args([""]));
-        assert!(should_reopen_primary_window_from_instance_args(["  "]));
-        assert!(should_reopen_primary_window_from_instance_args(["menubar"]));
-    }
-
-    #[test]
-    fn menubar_launch_does_not_suppress_blur_dismiss() {
-        assert_eq!(
-            launch_behavior(false, true, ["menubar"]),
-            LaunchBehavior {
-                open_primary_window_at_start: true,
-                suppress_blur_dismiss: false,
-            }
-        );
-    }
-
-    #[test]
-    fn automation_launch_opens_and_suppresses_blur_dismiss() {
-        let launch = launch_behavior(true, true, std::iter::empty::<&str>());
-        assert_eq!(
-            launch,
-            LaunchBehavior {
-                open_primary_window_at_start: true,
-                suppress_blur_dismiss: true,
-            }
-        );
-        assert!(should_suppress_blur_dismiss(launch, false));
-    }
-
-    #[test]
-    fn proof_mode_suppresses_blur_dismiss() {
-        let launch = launch_behavior(false, true, std::iter::empty::<&str>());
-        assert!(should_suppress_blur_dismiss(launch, true));
-    }
-
-    #[test]
-    fn visible_start_delays_stay_short() {
         assert_eq!(PROOF_ACTIVATION_DELAY, Duration::ZERO);
-        assert!(VISIBLE_START_ACTIVATION_DELAY <= Duration::from_millis(500));
+    }
+
+    #[test]
+    fn second_instance_targets_the_flyout() {
+        assert_eq!(
+            second_instance_action(std::iter::empty::<&str>()),
+            SecondInstanceAction::ToggleFlyout
+        );
+        assert_eq!(
+            second_instance_action([""]),
+            SecondInstanceAction::ToggleFlyout
+        );
+        assert_eq!(
+            second_instance_action(["  "]),
+            SecondInstanceAction::ToggleFlyout
+        );
+        assert_eq!(
+            second_instance_action(["menubar"]),
+            SecondInstanceAction::ToggleFlyout
+        );
+        assert_eq!(
+            second_instance_action(["/tray_panel"]),
+            SecondInstanceAction::ToggleFlyout
+        );
+    }
+
+    #[test]
+    fn second_instance_with_arguments_still_targets_the_flyout() {
+        assert_eq!(
+            second_instance_action(["usage", "-p", "claude"]),
+            SecondInstanceAction::ToggleFlyout
+        );
+    }
+
+    #[test]
+    fn main_window_config_starts_hidden_without_taskbar_entry() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let main_window = config["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["label"] == "main")
+            .expect("main window config");
+
+        assert_eq!(main_window["visible"], false);
+        assert_eq!(main_window["skipTaskbar"], true);
+        assert_eq!(main_window["decorations"], false);
+    }
+
+    #[test]
+    fn only_proof_mode_suppresses_blur_dismiss() {
+        assert!(!should_suppress_blur_dismiss(false));
+        assert!(should_suppress_blur_dismiss(true));
     }
 }

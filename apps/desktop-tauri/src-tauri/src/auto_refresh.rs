@@ -5,19 +5,29 @@ use codexbar::settings::Settings;
 
 const AUTO_REFRESH_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RefreshPlan {
+    run_initial_refresh: bool,
+    periodic_interval: Option<Duration>,
+}
+
 pub fn install(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut schedule: Option<(Duration, Instant)> = None;
+        let initial_plan = refresh_plan(Settings::load().refresh_interval_secs);
+        if initial_plan.run_initial_refresh {
+            let _ = crate::commands::do_refresh_providers_if_stale(&app).await;
+        }
+
+        let mut schedule = initial_plan
+            .periodic_interval
+            .map(|interval| (interval, Instant::now() + interval));
         loop {
             let interval = refresh_interval(Settings::load().refresh_interval_secs);
             match interval {
                 None => schedule = None,
                 Some(interval) => {
                     let now = Instant::now();
-                    let scheduled_at = schedule
-                        .filter(|(scheduled_interval, _)| *scheduled_interval == interval)
-                        .map(|(_, scheduled_at)| scheduled_at)
-                        .unwrap_or(now);
+                    let scheduled_at = scheduled_at_for_interval(&mut schedule, interval, now);
                     if now >= scheduled_at {
                         let _ = crate::commands::do_refresh_providers_if_stale(&app).await;
                         schedule = Some((
@@ -30,6 +40,28 @@ pub fn install(app: tauri::AppHandle) {
             tokio::time::sleep(AUTO_REFRESH_POLL_INTERVAL).await;
         }
     });
+}
+
+fn scheduled_at_for_interval(
+    schedule: &mut Option<(Duration, Instant)>,
+    interval: Duration,
+    now: Instant,
+) -> Instant {
+    match *schedule {
+        Some((scheduled_interval, scheduled_at)) if scheduled_interval == interval => scheduled_at,
+        _ => {
+            let scheduled_at = now + interval;
+            *schedule = Some((interval, scheduled_at));
+            scheduled_at
+        }
+    }
+}
+
+fn refresh_plan(seconds: u64) -> RefreshPlan {
+    RefreshPlan {
+        run_initial_refresh: true,
+        periodic_interval: refresh_interval(seconds),
+    }
 }
 
 fn next_fixed_tick(
@@ -81,8 +113,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manual_refresh_setting_disables_background_refresh() {
-        assert_eq!(refresh_interval(0), None);
+    fn manual_refresh_setting_disables_repetition_but_not_initial_refresh() {
+        assert_eq!(
+            refresh_plan(0),
+            RefreshPlan {
+                run_initial_refresh: true,
+                periodic_interval: None,
+            }
+        );
+    }
+
+    #[test]
+    fn periodic_setting_still_starts_with_background_refresh() {
+        assert_eq!(
+            refresh_plan(300),
+            RefreshPlan {
+                run_initial_refresh: true,
+                periodic_interval: Some(Duration::from_secs(300)),
+            }
+        );
+    }
+
+    #[test]
+    fn enabling_periodic_refresh_persists_the_first_deadline() {
+        let now = Instant::now();
+        let interval = Duration::from_secs(300);
+        let mut schedule = None;
+
+        let scheduled_at = scheduled_at_for_interval(&mut schedule, interval, now);
+
+        assert_eq!(scheduled_at, now + interval);
+        assert_eq!(schedule, Some((interval, scheduled_at)));
+    }
+
+    #[test]
+    fn changing_periodic_refresh_replaces_the_old_deadline() {
+        let now = Instant::now();
+        let old_interval = Duration::from_secs(300);
+        let new_interval = Duration::from_secs(600);
+        let mut schedule = Some((old_interval, now + old_interval));
+
+        let scheduled_at = scheduled_at_for_interval(&mut schedule, new_interval, now);
+
+        assert_eq!(scheduled_at, now + new_interval);
+        assert_eq!(schedule, Some((new_interval, scheduled_at)));
     }
 
     #[test]
